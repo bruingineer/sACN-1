@@ -17,50 +17,19 @@
  * https://github.com/ETCLabs/sACN
  *****************************************************************************/
 
-/**
- * @file sacn/version.h
- * @brief Provides the current version of the sACN library.
- *
- * This file is provided for application use; the values defined in this file are not used
- * internally by the library.
- */
+#include "gtest/gtest.h"
+#include "fff.h"
 
-#ifndef SACN_VERSION_H_
-#define SACN_VERSION_H_
+DEFINE_FFF_GLOBALS;
 
-/* clang-format off */
+extern "C" void SacnTestingAssertHandler(const char* expression, const char* file, unsigned int line)
+{
+  FAIL() << "Assertion failure from inside sACN library. Expression: " << expression << " File: " << file
+         << " Line: " << line;
+}
 
-/**
- * @addtogroup sACN
- * @{
- */
-
-/**
- * @name sACN version numbers
- * @{
- */
-#define SACN_VERSION_MAJOR 2 /**< The major version. */
-#define SACN_VERSION_MINOR 0 /**< The minor version. */
-#define SACN_VERSION_PATCH 0 /**< The patch version. */
-#define SACN_VERSION_BUILD 5 /**< The build number. */
-/**
- * @}
- */
-
-/**
- * @name sACN version strings
- * @{
- */
-#define SACN_VERSION_STRING      "2.0.0.5"
-#define SACN_VERSION_DATESTR     "17.May.2021"
-#define SACN_VERSION_COPYRIGHT   "Copyright 2021 ETC Inc."
-#define SACN_VERSION_PRODUCTNAME "sACN"
-/**
- * @}
- */
-
-/**
- * @}
- */
-
-#endif /* SACN_VERSION_H_ */
+int main(int argc, char* argv[])
+{
+  testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
+}

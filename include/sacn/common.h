@@ -54,6 +54,16 @@ extern "C" {
  */
 #define DMX_ADDRESS_COUNT 512
 
+/** A source discovered on an sACN network that has a CID - used by Receiver and Merge Receiver. */
+typedef uint16_t sacn_remote_source_t;
+/** An invalid remote source handle value. */
+#define SACN_REMOTE_SOURCE_INVALID ((sacn_remote_source_t)-1)
+
+/** The DMX start code. */
+#define SACN_STARTCODE_DMX 0x00u
+/** The per-address priority start code. */
+#define SACN_STARTCODE_PRIORITY 0xddu
+
 /**
  * This enum defines how the API module will use IPv4 and IPv6 networking.
  */
@@ -76,6 +86,10 @@ typedef struct SacnHeaderData
    * The source's Component Identifier (CID).
    */
   EtcPalUuid cid;
+  /**
+   * The source's handle, uniquely identifying the source.
+   */
+  sacn_remote_source_t source_handle;
   /**
    * A user-assigned name for displaying the identity of a source.
    */
@@ -123,6 +137,9 @@ typedef struct SacnMcastInterface
 
 etcpal_error_t sacn_init(const EtcPalLogParams* log_params);
 void sacn_deinit(void);
+
+sacn_remote_source_t sacn_get_remote_source_handle(const EtcPalUuid* source_cid);
+etcpal_error_t sacn_get_remote_source_cid(sacn_remote_source_t source_handle, EtcPalUuid* source_cid);
 
 #ifdef __cplusplus
 }
