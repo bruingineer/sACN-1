@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,8 +27,11 @@
 
 #include <vector>
 
+#include "sacn/cpp/common.h"
+
 #include "sacn/receiver.h"
 #include "etcpal/cpp/inet.h"
+#include "etcpal/cpp/opaque_id.h"
 
 /**
  * @defgroup sacn_receiver_cpp sACN Receiver API
@@ -38,6 +41,14 @@
 
 namespace sacn
 {
+
+namespace detail
+{
+class ReceiverHandleType
+{
+};
+};  // namespace detail
+
 /**
  * @ingroup sacn_receiver_cpp
  * @brief An instance of sACN Receiver functionality; see @ref using_receiver.
@@ -51,9 +62,7 @@ class Receiver
 {
 public:
   /** A handle type used by the sACN library to identify receiver instances. */
-  using Handle = sacn_receiver_t;
-  /** An invalid Handle value. */
-  static constexpr Handle kInvalidHandle = SACN_RECEIVER_INVALID;
+  using Handle = etcpal::OpaqueId<detail::ReceiverHandleType, sacn_receiver_t, SACN_RECEIVER_INVALID>;
 
   /**
    * @ingroup sacn_receiver_cpp
@@ -65,7 +74,7 @@ public:
     virtual ~NotifyHandler() = default;
 
     /**
-     * @brief Notify that a data packet has been received.
+     * @brief Notify that new universe data within the configured footprint has been received.
      *
      * This will not be called if the Stream_Terminated bit is set, or if the Preview_Data bit is set and preview
      * packets are being filtered.
@@ -85,12 +94,12 @@ public:
      *
      * @param receiver_handle The receiver's handle.
      * @param source_addr IP address & port of the packet source.
-     * @param header The sACN header data.
-     * @param pdata The DMX data.  Use header.slot_count to determine the length of this array.
-     * @param is_sampling True if this data was received during the sampling period, false otherwise.
+     * @param source_info Information about the source that sent this data.
+     * @param universe_data The universe data (and relevant information about that data), starting from the first slot
+     * of the currently configured footprint.
      */
     virtual void HandleUniverseData(Handle receiver_handle, const etcpal::SockAddr& source_addr,
-                                    const SacnHeaderData& header, const uint8_t* pdata, bool is_sampling) = 0;
+                                    const SacnRemoteSource& source_info, const SacnRecvUniverseData& universe_data) = 0;
 
     /**
      * @brief Notify that one or more sources have entered a source loss state.
@@ -161,8 +170,13 @@ public:
 
     /********* Optional values **********/
 
-    int source_count_max{SACN_RECEIVER_INFINITE_SOURCES}; /**< The maximum number of sources this universe will
-                                                                listen to when using dynamic memory. */
+    /** The footprint within the universe to monitor. TODO: Currently unimplemented and thus ignored. */
+    SacnRecvUniverseSubrange footprint{1, DMX_ADDRESS_COUNT};
+
+    /** The maximum number of sources this universe will listen to.  May be #SACN_RECEIVER_INFINITE_SOURCES.
+        When configured to use static memory, this parameter is only used if it's less than
+        #SACN_RECEIVER_MAX_SOURCES_PER_UNIVERSE -- otherwise #SACN_RECEIVER_MAX_SOURCES_PER_UNIVERSE is used instead.*/
+    int source_count_max{SACN_RECEIVER_INFINITE_SOURCES};
     unsigned int flags{0}; /**< A set of option flags. See the C API's "sACN receiver flags". */
 
     sacn_ip_support_t ip_supported{kSacnIpV4AndIpV6}; /**< What IP networking the receiver will support. */
@@ -207,7 +221,10 @@ public:
                         std::vector<SacnMcastInterface>& netints);
   void Shutdown();
   etcpal::Expected<uint16_t> GetUniverse() const;
+  etcpal::Expected<SacnRecvUniverseSubrange> GetFootprint() const;
   etcpal::Error ChangeUniverse(uint16_t new_universe_id);
+  etcpal::Error ChangeFootprint(const SacnRecvUniverseSubrange& new_footprint);
+  etcpal::Error ChangeUniverseAndFootprint(uint16_t new_universe_id, const SacnRecvUniverseSubrange& new_footprint);
   std::vector<EtcPalMcastNetintId> GetNetworkInterfaces();
 
   // Lesser used functions.  These apply to all instances of this class.
@@ -216,14 +233,15 @@ public:
 
   static etcpal::Error ResetNetworking();
   static etcpal::Error ResetNetworking(std::vector<SacnMcastInterface>& netints);
-  static etcpal::Error ResetNetworking(std::vector<NetintList>& netint_lists);
+  static etcpal::Error ResetNetworking(std::vector<SacnMcastInterface>& sys_netints,
+                                       std::vector<NetintList>& netint_lists);
 
   constexpr Handle handle() const;
 
 private:
   SacnReceiverConfig TranslateConfig(const Settings& settings, NotifyHandler& notify_handler);
 
-  Handle handle_{kInvalidHandle};
+  Handle handle_;
 };
 
 /**
@@ -233,13 +251,13 @@ private:
 namespace internal
 {
 extern "C" inline void ReceiverCbUniverseData(sacn_receiver_t receiver_handle, const EtcPalSockAddr* source_addr,
-                                              const SacnHeaderData* header, const uint8_t* pdata, bool is_sampling,
-                                              void* context)
+                                              const SacnRemoteSource* source_info,
+                                              const SacnRecvUniverseData* universe_data, void* context)
 {
-  if (source_addr && header && context)
+  if (source_addr && source_info && universe_data && context)
   {
-    static_cast<Receiver::NotifyHandler*>(context)->HandleUniverseData(receiver_handle, *source_addr, *header, pdata,
-                                                                       is_sampling);
+    static_cast<Receiver::NotifyHandler*>(context)->HandleUniverseData(Receiver::Handle(receiver_handle), *source_addr,
+                                                                       *source_info, *universe_data);
   }
 }
 
@@ -249,7 +267,7 @@ extern "C" inline void ReceiverCbSourcesLost(sacn_receiver_t handle, uint16_t un
   if (context && lost_sources && (num_lost_sources > 0))
   {
     std::vector<SacnLostSource> lost_vec(lost_sources, lost_sources + num_lost_sources);
-    static_cast<Receiver::NotifyHandler*>(context)->HandleSourcesLost(handle, universe, lost_vec);
+    static_cast<Receiver::NotifyHandler*>(context)->HandleSourcesLost(Receiver::Handle(handle), universe, lost_vec);
   }
 }
 
@@ -257,7 +275,7 @@ extern "C" inline void ReceiverCbSamplingPeriodStarted(sacn_receiver_t handle, u
 {
   if (context)
   {
-    static_cast<Receiver::NotifyHandler*>(context)->HandleSamplingPeriodStarted(handle, universe);
+    static_cast<Receiver::NotifyHandler*>(context)->HandleSamplingPeriodStarted(Receiver::Handle(handle), universe);
   }
 }
 
@@ -265,16 +283,16 @@ extern "C" inline void ReceiverCbSamplingPeriodEnded(sacn_receiver_t handle, uin
 {
   if (context)
   {
-    static_cast<Receiver::NotifyHandler*>(context)->HandleSamplingPeriodEnded(handle, universe);
+    static_cast<Receiver::NotifyHandler*>(context)->HandleSamplingPeriodEnded(Receiver::Handle(handle), universe);
   }
 }
 
 extern "C" inline void ReceiverCbPapLost(sacn_receiver_t handle, uint16_t universe, const SacnRemoteSource* source,
                                          void* context)
 {
-  if (source && context)
+  if (context && source)
   {
-    static_cast<Receiver::NotifyHandler*>(context)->HandleSourcePapLost(handle, universe, *source);
+    static_cast<Receiver::NotifyHandler*>(context)->HandleSourcePapLost(Receiver::Handle(handle), universe, *source);
   }
 }
 
@@ -282,7 +300,7 @@ extern "C" inline void ReceiverCbSourceLimitExceeded(sacn_receiver_t handle, uin
 {
   if (context)
   {
-    static_cast<Receiver::NotifyHandler*>(context)->HandleSourceLimitExceeded(handle, universe);
+    static_cast<Receiver::NotifyHandler*>(context)->HandleSourceLimitExceeded(Receiver::Handle(handle), universe);
   }
 }
 
@@ -306,7 +324,9 @@ inline Receiver::Settings::Settings(uint16_t new_universe_id) : universe_id(new_
  */
 inline bool Receiver::Settings::IsValid() const
 {
-  return (universe_id > 0);
+  return (universe_id > 0) && (footprint.start_address >= 1) && (footprint.start_address <= DMX_ADDRESS_COUNT) &&
+         (footprint.address_count >= 1) &&
+         (footprint.address_count <= (DMX_ADDRESS_COUNT - footprint.start_address + 1));
 }
 
 /**
@@ -377,10 +397,22 @@ inline etcpal::Error Receiver::Startup(const Settings& settings, NotifyHandler& 
 {
   SacnReceiverConfig config = TranslateConfig(settings, notify_handler);
 
-  if (netints.empty())
-    return sacn_receiver_create(&config, &handle_, NULL, 0);
+  sacn_receiver_t c_handle = SACN_RECEIVER_INVALID;
+  etcpal::Error result = kEtcPalErrOk;
 
-  return sacn_receiver_create(&config, &handle_, netints.data(), netints.size());
+  if (netints.empty())
+  {
+    result = sacn_receiver_create(&config, &c_handle, NULL);
+  }
+  else
+  {
+    SacnNetintConfig netint_config = {netints.data(), netints.size()};
+    result = sacn_receiver_create(&config, &c_handle, &netint_config);
+  }
+
+  handle_.SetValue(c_handle);
+
+  return result;
 }
 
 /**
@@ -391,19 +423,19 @@ inline etcpal::Error Receiver::Startup(const Settings& settings, NotifyHandler& 
  */
 inline void Receiver::Shutdown()
 {
-  sacn_receiver_destroy(handle_);
-  handle_ = kInvalidHandle;
+  sacn_receiver_destroy(handle_.value());
+  handle_.Clear();
 }
 
 /**
- * @brief Get the universe this class is listening to.
+ * @brief Get the universe this receiver is listening to.
  *
  * @return If valid, the value is the universe id.  Otherwise, this is the underlying error the C library call returned.
  */
-etcpal::Expected<uint16_t> Receiver::GetUniverse() const
+inline etcpal::Expected<uint16_t> Receiver::GetUniverse() const
 {
   uint16_t result = 0;
-  etcpal_error_t err = sacn_receiver_get_universe(handle_, &result);
+  etcpal_error_t err = sacn_receiver_get_universe(handle_.value(), &result);
   if (err == kEtcPalErrOk)
     return result;
   else
@@ -411,7 +443,24 @@ etcpal::Expected<uint16_t> Receiver::GetUniverse() const
 }
 
 /**
- * @brief Change the universe this class is listening to.
+ * @brief Get the footprint within the universe this receiver is listening to.
+ *
+ * TODO: At this time, custom footprints are not supported by this library, so the full 512-slot footprint is returned.
+ *
+ * @return If valid, the value is the footprint.  Otherwise, this is the underlying error the C library call returned.
+ */
+inline etcpal::Expected<SacnRecvUniverseSubrange> Receiver::GetFootprint() const
+{
+  SacnRecvUniverseSubrange result;
+  etcpal_error_t err = sacn_receiver_get_footprint(handle_.value(), &result);
+  if (err == kEtcPalErrOk)
+    return result;
+  else
+    return err;
+}
+
+/**
+ * @brief Change the universe this receiver is listening to.
  *
  * An sACN receiver can only listen on one universe at a time. After this call completes successfully, the receiver is
  * in a sampling period for the new universe and will provide HandleSamplingPeriodStarted() and
@@ -429,7 +478,39 @@ etcpal::Expected<uint16_t> Receiver::GetUniverse() const
  */
 inline etcpal::Error Receiver::ChangeUniverse(uint16_t new_universe_id)
 {
-  return sacn_receiver_change_universe(handle_, new_universe_id);
+  return sacn_receiver_change_universe(handle_.value(), new_universe_id);
+}
+
+/**
+ * @brief Change the footprint within the universe this receiver is listening to. TODO: Not yet implemented.
+ *
+ * After this call completes successfully, the receiver is in a sampling period for the new footprint and will provide
+ * HandleSamplingPeriodStarted() and HandleSamplingPeriodEnded() notifications, as well as HandleUniverseData()
+ * notifications as packets are received for the new footprint.
+ *
+ * @param[in] new_footprint New footprint that this receiver should listen to.
+ * @return #kEtcPalErrNotImpl: Not yet implemented.
+ */
+inline etcpal::Error Receiver::ChangeFootprint(const SacnRecvUniverseSubrange& new_footprint)
+{
+  return sacn_receiver_change_footprint(handle_.value(), &new_footprint);
+}
+
+/**
+ * @brief Change the universe and footprint this receiver is listening to. TODO: Not yet implemented.
+ *
+ * After this call completes successfully, the receiver is in a sampling period for the new footprint and will provide
+ * HandleSamplingPeriodStarted() and HandleSamplingPeriodEnded() notifications, as well as HandleUniverseData()
+ * notifications as packets are received for the new footprint.
+ *
+ * @param[in] new_universe_id New universe number that this receiver should listen to.
+ * @param[in] new_footprint New footprint within the universe.
+ * @return #kEtcPalErrNotImpl: Not yet implemented.
+ */
+inline etcpal::Error Receiver::ChangeUniverseAndFootprint(uint16_t new_universe_id,
+                                                          const SacnRecvUniverseSubrange& new_footprint)
+{
+  return sacn_receiver_change_universe_and_footprint(handle_.value(), new_universe_id, &new_footprint);
 }
 
 /**
@@ -447,7 +528,7 @@ inline std::vector<EtcPalMcastNetintId> Receiver::GetNetworkInterfaces()
   do
   {
     netints.resize(size_guess);
-    num_netints = sacn_receiver_get_network_interfaces(handle_, netints.data(), netints.size());
+    num_netints = sacn_receiver_get_network_interfaces(handle_.value(), netints.data(), netints.size());
     size_guess = num_netints + 4u;
   } while (num_netints > netints.size());
 
@@ -488,8 +569,9 @@ inline uint32_t Receiver::GetExpiredWait()
  *
  * This is the overload of ResetNetworking that uses all network interfaces.
  *
- * This is typically used when the application detects that the list of networking interfaces has changed, and wants
- * every receiver to use all system network interfaces.
+ * This is typically used when the application detects that the list of networking interfaces has changed. The receiver
+ * API will no longer be limited to specific interfaces (the list passed into sacn::Init(), if any, is overridden for
+ * the receiver API, but not the other APIs). Every receiver is set to all system interfaces.
  *
  * After this call completes successfully, every receiver is in a sampling period for their universes and will provide
  * SamplingPeriodStarted() and SamplingPeriodEnded() notifications, as well as UniverseData() notifications as packets
@@ -511,10 +593,12 @@ inline etcpal::Error Receiver::ResetNetworking()
 }
 
 /**
- * @brief Resets the underlying network sockets and packet receipt state for all sACN receivers.
+ * @brief Resets underlying network sockets and packet receipt state, determines network interfaces for all receivers.
  *
- * This is typically used when the application detects that the list of networking interfaces has changed, and wants
- * every receiver to use the same network interfaces.
+ * This is typically used when the application detects that the list of networking interfaces has changed. This changes
+ * the list of system interfaces the receiver API will be limited to (the list passed into sacn::Init(), if any, is
+ * overridden for the receiver API, but not the other APIs). Then all receivers will be configured to use all of those
+ * interfaces.
  *
  * After this call completes successfully, every receiver is in a sampling period for their universes and will provide
  * SamplingPeriodStarted() and SamplingPeriodEnded() notifications, as well as UniverseData() notifications as packets
@@ -524,26 +608,29 @@ inline etcpal::Error Receiver::ResetNetworking()
  * Note that the networking reset is considered successful if it is able to successfully use any of the
  * network interfaces passed in. This will only return #kEtcPalErrNoNetints if none of the interfaces work.
  *
- * @param[in, out] netints If !empty, this is the list of interfaces the application wants to use, and the status
- * codes are filled in.  If empty, all available interfaces are tried and this vector isn't modified.
+ * @param sys_netints If !empty, this is the list of system interfaces the receiver API will be limited to, and the
+ * status codes are filled in.  If empty, the receiver API is allowed to use all available system interfaces.
  * @return #kEtcPalErrOk: Networking reset successfully.
  * @return #kEtcPalErrNoNetints: None of the network interfaces provided were usable by the library.
  * @return #kEtcPalErrNotInit: Module not initialized.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
-inline etcpal::Error Receiver::ResetNetworking(std::vector<SacnMcastInterface>& netints)
+inline etcpal::Error Receiver::ResetNetworking(std::vector<SacnMcastInterface>& sys_netints)
 {
-  if (netints.empty())
-    return sacn_receiver_reset_networking(nullptr, 0);
+  if (sys_netints.empty())
+    return sacn_receiver_reset_networking(nullptr);
 
-  return sacn_receiver_reset_networking(netints.data(), netints.size());
+  SacnNetintConfig netint_config = {sys_netints.data(), sys_netints.size()};
+  return sacn_receiver_reset_networking(&netint_config);
 }
 
 /**
  * @brief Resets underlying network sockets and packet receipt state, determines network interfaces for each receiver.
  *
- * This is typically used when the application detects that the list of networking interfaces has changed, and wants to
- * determine what the new network interfaces should be for each receiver.
+ * This is typically used when the application detects that the list of networking interfaces has changed. This changes
+ * the list of system interfaces the receiver API will be limited to (the list passed into sacn::Init(), if any, is
+ * overridden for the receiver API, but not the other APIs). Then the network interfaces are specified for each
+ * receiver.
  *
  * After this call completes successfully, every receiver is in a sampling period for their universes and will provide
  * SamplingPeriodStarted() and SamplingPeriodEnded() notifications, as well as UniverseData() notifications as packets
@@ -554,8 +641,10 @@ inline etcpal::Error Receiver::ResetNetworking(std::vector<SacnMcastInterface>& 
  * interfaces passed in for each receiver. This will only return #kEtcPalErrNoNetints if none of the interfaces work for
  * a receiver.
  *
- * @param[in, out] netint_lists Vector of lists of interfaces the application wants to use for each receiver. Must
- * not be empty. Must include all receivers, and nothing more. The status codes are filled in whenever
+ * @param sys_netints If !empty, this is the list of system interfaces the receiver API will be limited to, and the
+ * status codes are filled in.  If empty, the receiver API is allowed to use all available system interfaces.
+ * @param[in, out] per_receiver_netint_lists Vector of lists of interfaces the application wants to use for each
+ * receiver. Must not be empty. Must include all receivers, and nothing more. The status codes are filled in whenever
  * Receiver::NetintList::netints is !empty.
  * @return #kEtcPalErrOk: Networking reset successfully.
  * @return #kEtcPalErrNoNetints: None of the network interfaces provided for a receiver were usable by the library.
@@ -563,29 +652,32 @@ inline etcpal::Error Receiver::ResetNetworking(std::vector<SacnMcastInterface>& 
  * @return #kEtcPalErrNotInit: Module not initialized.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
-inline etcpal::Error Receiver::ResetNetworking(std::vector<NetintList>& netint_lists)
+inline etcpal::Error Receiver::ResetNetworking(std::vector<SacnMcastInterface>& sys_netints,
+                                               std::vector<NetintList>& per_receiver_netint_lists)
 {
   std::vector<SacnReceiverNetintList> netint_lists_c;
-  netint_lists_c.reserve(netint_lists.size());
-  std::transform(
-      netint_lists.begin(), netint_lists.end(), std::back_inserter(netint_lists_c), [](NetintList& list) {
-        // clang-format off
-        SacnReceiverNetintList c_list = {
-          list.handle,
-          list.netints.data(),
-          list.netints.size()
-        };
-        // clang-format on
+  netint_lists_c.reserve(per_receiver_netint_lists.size());
+  std::transform(per_receiver_netint_lists.begin(), per_receiver_netint_lists.end(), std::back_inserter(netint_lists_c),
+                 [](NetintList& list) {
+                   // clang-format off
+                   SacnReceiverNetintList c_list = {
+                     list.handle,
+                     list.netints.data(),
+                     list.netints.size()
+                   };
+                   // clang-format on
 
-        return c_list;
-      });
-  return sacn_receiver_reset_networking_per_receiver(netint_lists_c.data(), netint_lists_c.size());
+                   return c_list;
+                 });
+
+  SacnNetintConfig sys_netint_config = {sys_netints.data(), sys_netints.size()};
+  return sacn_receiver_reset_networking_per_receiver(&sys_netint_config, netint_lists_c.data(), netint_lists_c.size());
 }
 
 /**
- * @brief Get the current handle to the underlying C sacn_receiver.
+ * @brief Get the current handle to the underlying C receiver.
  *
- * @return The handle or Receiver::kInvalidHandle.
+ * @return The handle, which will only be valid if the receiver has been successfully created using Startup().
  */
 inline constexpr Receiver::Handle Receiver::handle() const
 {
@@ -606,6 +698,7 @@ inline SacnReceiverConfig Receiver::TranslateConfig(const Settings& settings, No
       internal::ReceiverCbSourceLimitExceeded,
       &notify_handler
     },
+    settings.footprint,
     settings.source_count_max,
     settings.flags,
     settings.ip_supported

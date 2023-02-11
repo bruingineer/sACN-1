@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,9 +57,9 @@ void sacn_source_state_deinit(void);
 int take_lock_and_process_sources(process_sources_behavior_t behavior);
 etcpal_error_t initialize_source_thread();
 sacn_source_t get_next_source_handle();
-void update_levels_and_or_paps(SacnSource* source, SacnSourceUniverse* universe, const uint8_t* new_values,
-                               size_t new_values_size, const uint8_t* new_priorities, size_t new_priorities_size,
-                               force_sync_behavior_t force_sync);
+void update_levels_and_or_pap(SacnSource* source, SacnSourceUniverse* universe, const uint8_t* new_values,
+                              size_t new_values_size, const uint8_t* new_priorities, size_t new_priorities_size,
+                              force_sync_behavior_t force_sync);
 void increment_sequence_number(SacnSourceUniverse* universe);
 void send_universe_unicast(const SacnSource* source, SacnSourceUniverse* universe, const uint8_t* send_buf);
 void send_universe_multicast(const SacnSource* source, SacnSourceUniverse* universe, const uint8_t* send_buf);
@@ -79,7 +79,9 @@ size_t get_source_universe_netints(const SacnSourceUniverse* universe, EtcPalMca
 void disable_pap_data(SacnSourceUniverse* universe);
 void clear_source_netints(SacnSource* source);
 etcpal_error_t reset_source_universe_networking(SacnSource* source, SacnSourceUniverse* universe,
-                                                SacnMcastInterface* netints, size_t num_netints);
+                                                const SacnNetintConfig* netint_config);
+void finish_source_universe_termination(SacnSource* source, size_t index);
+void finish_unicast_dest_termination(SacnSourceUniverse* universe, size_t index);
 
 #ifdef __cplusplus
 }

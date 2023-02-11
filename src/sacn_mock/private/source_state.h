@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ DECLARE_FAKE_VOID_FUNC(sacn_source_state_deinit);
 DECLARE_FAKE_VALUE_FUNC(int, take_lock_and_process_sources, process_sources_behavior_t);
 DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, initialize_source_thread);
 DECLARE_FAKE_VALUE_FUNC(sacn_source_t, get_next_source_handle);
-DECLARE_FAKE_VOID_FUNC(update_levels_and_or_paps, SacnSource*, SacnSourceUniverse*, const uint8_t*, size_t,
+DECLARE_FAKE_VOID_FUNC(update_levels_and_or_pap, SacnSource*, SacnSourceUniverse*, const uint8_t*, size_t,
                        const uint8_t*, size_t, force_sync_behavior_t);
 DECLARE_FAKE_VOID_FUNC(increment_sequence_number, SacnSourceUniverse*);
 DECLARE_FAKE_VOID_FUNC(send_universe_unicast, const SacnSource*, SacnSourceUniverse*, const uint8_t*);
@@ -52,7 +52,9 @@ DECLARE_FAKE_VALUE_FUNC(size_t, get_source_universe_netints, const SacnSourceUni
 DECLARE_FAKE_VOID_FUNC(disable_pap_data, SacnSourceUniverse*);
 DECLARE_FAKE_VOID_FUNC(clear_source_netints, SacnSource*);
 DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, reset_source_universe_networking, SacnSource*, SacnSourceUniverse*,
-                        SacnMcastInterface*, size_t);
+                        const SacnNetintConfig*);
+DECLARE_FAKE_VOID_FUNC(finish_source_universe_termination, SacnSource*, size_t);
+DECLARE_FAKE_VOID_FUNC(finish_unicast_dest_termination, SacnSourceUniverse*, size_t);
 
 void sacn_source_state_reset_all_fakes(void);
 

@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -67,7 +67,7 @@ typedef uint16_t sacn_remote_source_t;
 /**
  * This enum defines how the API module will use IPv4 and IPv6 networking.
  */
-typedef enum 
+typedef enum
 {
   /** Use IPv4 only. */
   kSacnIpV4Only,
@@ -76,47 +76,6 @@ typedef enum
   /** Use both IPv4 and IPv6. */
   kSacnIpV4AndIpV6
 } sacn_ip_support_t;
-
-/**
- * The data present in the header of an sACN data packet.
- */
-typedef struct SacnHeaderData
-{
-  /**
-   * The source's Component Identifier (CID).
-   */
-  EtcPalUuid cid;
-  /**
-   * The source's handle, uniquely identifying the source.
-   */
-  sacn_remote_source_t source_handle;
-  /**
-   * A user-assigned name for displaying the identity of a source.
-   */
-  char source_name[SACN_SOURCE_NAME_MAX_LEN];
-  /**
-   * The sACN Universe identifier. Valid range is 1-63999, inclusive.
-   */
-  uint16_t universe_id;
-  /**
-   * The priority of the sACN data. Valid range is 0-200, inclusive.
-   */
-  uint8_t priority;
-  /**
-   * Whether the Preview_Data bit is set for the sACN data. From E1.31: "Indicates that the data in
-   * this packet is intended for use in visualization or media server preview applications and
-   * shall not be used to generate live output."
-   */
-  bool preview;
-  /**
-   * The start code of the DMX data.
-   */
-  uint8_t start_code;
-  /**
-   * The number of slots in the DMX data.
-   */
-  uint16_t slot_count;
-} SacnHeaderData;
 
 /**
  * On input, this structure is used to indicate a network interface to use.
@@ -135,7 +94,20 @@ typedef struct SacnMcastInterface
   etcpal_error_t status;
 } SacnMcastInterface;
 
-etcpal_error_t sacn_init(const EtcPalLogParams* log_params);
+/**
+ * Network interface configuration information to give the sACN library. Multicast traffic will be restricted to the
+ * network interfaces given. The statuses are filled in for each interface.
+ */
+typedef struct SacnNetintConfig
+{
+  /** An array of network interface IDs to which to restrict sACN traffic. The statuses are filled in for each
+      interface. */
+  SacnMcastInterface* netints;
+  /** Size of netints array. */
+  size_t num_netints;
+} SacnNetintConfig;
+
+etcpal_error_t sacn_init(const EtcPalLogParams* log_params, const SacnNetintConfig* sys_netint_config);
 void sacn_deinit(void);
 
 sacn_remote_source_t sacn_get_remote_source_handle(const EtcPalUuid* source_cid);

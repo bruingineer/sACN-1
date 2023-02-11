@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,10 +51,10 @@
  * @name sACN version strings
  * @{
  */
-#define SACN_VERSION_STRING      "@VERSION@"
-#define SACN_VERSION_DATESTR     "@DATESTR@"
-#define SACN_VERSION_COPYRIGHT   "@COPYRIGHT@"
-#define SACN_VERSION_PRODUCTNAME "sACN"
+#define SACN_VERSION_STRING      "@VERSION@" /**< The 4-digit version string. */
+#define SACN_VERSION_DATESTR     "@DATESTR@" /**< The date this version was released (dd.Mm.yyyy). */
+#define SACN_VERSION_COPYRIGHT   "@COPYRIGHT@" /**< The version's copyright string. */
+#define SACN_VERSION_PRODUCTNAME "sACN" /**< The version's product name. */
 /**
  * @}
  */

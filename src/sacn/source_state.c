@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,10 +25,13 @@
 #include "sacn/private/sockets.h"
 #include "sacn/private/source_state.h"
 #include "sacn/private/util.h"
+#include "etcpal/handle_manager.h"
 #include "etcpal/netint.h"
 #include "etcpal/pack.h"
 #include "etcpal/rbtree.h"
 #include "etcpal/timer.h"
+
+#if SACN_SOURCE_ENABLED
 
 // Suppress strncpy() warning on Windows/MSVC.
 #ifdef _MSC_VER
@@ -50,14 +53,10 @@ static bool thread_initialized = false;
 
 /*********************** Private function prototypes *************************/
 
-#if SACN_SOURCE_ENABLED
 static bool source_handle_in_use(int handle_val, void* cookie);
-#endif
 
 static etcpal_error_t start_tick_thread();
-#if SACN_SOURCE_ENABLED
 static void stop_tick_thread();
-#endif
 
 static void source_thread_function(void* arg);
 
@@ -66,7 +65,7 @@ static void process_universe_discovery(SacnSource* source);
 static void process_universes(SacnSource* source);
 static void process_unicast_dests(SacnSource* source, SacnSourceUniverse* universe, bool* terminating);
 static void process_universe_termination(SacnSource* source, size_t index, bool unicast_terminating);
-static void transmit_levels_and_paps_when_needed(SacnSource* source, SacnSourceUniverse* universe);
+static void transmit_levels_and_pap_when_needed(SacnSource* source, SacnSourceUniverse* universe);
 static void send_termination_multicast(const SacnSource* source, SacnSourceUniverse* universe);
 static void send_termination_unicast(const SacnSource* source, SacnSourceUniverse* universe,
                                      SacnUnicastDestination* dest);
@@ -75,9 +74,9 @@ static int pack_universe_discovery_page(SacnSource* source, size_t* universe_ind
 static void update_levels(SacnSource* source_state, SacnSourceUniverse* universe_state, const uint8_t* new_levels,
                           size_t new_levels_size, force_sync_behavior_t force_sync);
 #if SACN_ETC_PRIORITY_EXTENSION
-static void update_paps(SacnSource* source_state, SacnSourceUniverse* universe_state, const uint8_t* new_priorities,
-                        size_t new_priorities_size, force_sync_behavior_t force_sync);
-static void zero_levels_where_paps_are_zero(SacnSourceUniverse* universe_state);
+static void update_pap(SacnSource* source_state, SacnSourceUniverse* universe_state, const uint8_t* new_priorities,
+                       size_t new_priorities_size, force_sync_behavior_t force_sync);
+static void zero_levels_where_pap_is_zero(SacnSourceUniverse* universe_state);
 #endif
 static void remove_from_source_netints(SacnSource* source, const EtcPalMcastNetintId* id);
 static void reset_unicast_dest(SacnUnicastDestination* dest);
@@ -88,17 +87,14 @@ static void cancel_termination_if_not_removing(SacnSourceUniverse* universe);
 
 etcpal_error_t sacn_source_state_init(void)
 {
-#if SACN_SOURCE_ENABLED
   shutting_down = false;
-  init_int_handle_manager(&source_handle_mgr, source_handle_in_use, NULL);
-#endif
+  init_int_handle_manager(&source_handle_mgr, -1, source_handle_in_use, NULL);
 
   return kEtcPalErrOk;
 }
 
 void sacn_source_state_deinit(void)
 {
-#if SACN_SOURCE_ENABLED
   // Shut down the Tick thread...
   bool thread_initted = false;
   if (sacn_lock())
@@ -110,10 +106,8 @@ void sacn_source_state_deinit(void)
 
   if (thread_initted)
     stop_tick_thread();
-#endif
 }
 
-#if SACN_SOURCE_ENABLED
 bool source_handle_in_use(int handle_val, void* cookie)
 {
   ETCPAL_UNUSED_ARG(cookie);
@@ -121,18 +115,16 @@ bool source_handle_in_use(int handle_val, void* cookie)
   SacnSource* tmp = NULL;
   return (handle_val == SACN_SOURCE_INVALID) || (lookup_source(handle_val, &tmp) == kEtcPalErrOk);
 }
-#endif
 
 // Needs lock
 etcpal_error_t start_tick_thread()
 {
   shutting_down = false;
-  EtcPalThreadParams params = ETCPAL_THREAD_PARAMS_INIT;
+  EtcPalThreadParams params = {SACN_SOURCE_THREAD_PRIORITY, SACN_SOURCE_THREAD_STACK, SACN_SOURCE_THREAD_NAME, NULL};
 
   return etcpal_thread_create(&source_thread_handle, &params, source_thread_function, NULL);
 }
 
-#if SACN_SOURCE_ENABLED
 // Takes lock
 void stop_tick_thread()
 {
@@ -148,7 +140,6 @@ void stop_tick_thread()
   // Wait for thread-based sources to terminate (assuming application already cleaned up manual sources)
   etcpal_thread_join(&thread_handle);
 }
-#endif
 
 // Takes lock
 void source_thread_function(void* arg)
@@ -212,7 +203,7 @@ etcpal_error_t initialize_source_thread()
 // Needs lock
 sacn_source_t get_next_source_handle()
 {
-  return (sacn_source_t)get_next_int_handle(&source_handle_mgr, -1);
+  return (sacn_source_t)get_next_int_handle(&source_handle_mgr);
 }
 
 // Needs lock
@@ -274,7 +265,7 @@ void process_universes(SacnSource* source)
 
     // Either transmit start codes 0x00 & 0xDD, or terminate and clean up universe
     if (universe->termination_state == kNotTerminating)
-      transmit_levels_and_paps_when_needed(source, universe);
+      transmit_levels_and_pap_when_needed(source, universe);
     else
       process_universe_termination(source, initial_num_universes - 1 - i, unicast_terminating);
   }
@@ -297,16 +288,9 @@ void process_unicast_dests(SacnSource* source, SacnSourceUniverse* universe, boo
         send_termination_unicast(source, universe, dest);
 
       if ((dest->num_terminations_sent >= 3) || !universe->has_level_data)
-      {
-        if (dest->termination_state == kTerminatingAndRemoving)
-          remove_sacn_unicast_dest(universe, initial_num_unicast_dests - 1 - i);
-        else
-          reset_unicast_dest(dest);
-      }
+        finish_unicast_dest_termination(universe, initial_num_unicast_dests - 1 - i);
       else
-      {
         *terminating = true;
-      }
     }
   }
 }
@@ -320,28 +304,11 @@ void process_universe_termination(SacnSource* source, size_t index, bool unicast
     send_termination_multicast(source, universe);
 
   if (((universe->num_terminations_sent >= 3) && !unicast_terminating) || !universe->has_level_data)
-  {
-    // Update num_active_universes if needed
-    if (IS_PART_OF_UNIVERSE_DISCOVERY(universe))
-      --source->num_active_universes;
-
-    if (universe->termination_state == kTerminatingAndRemoving)
-    {
-      // Update the netints tree
-      for (size_t i = 0; i < universe->netints.num_netints; ++i)
-        remove_from_source_netints(source, &universe->netints.netints[i]);
-
-      remove_sacn_source_universe(source, index);
-    }
-    else
-    {
-      reset_universe(universe);
-    }
-  }
+    finish_source_universe_termination(source, index);
 }
 
 // Needs lock
-void transmit_levels_and_paps_when_needed(SacnSource* source, SacnSourceUniverse* universe)
+void transmit_levels_and_pap_when_needed(SacnSource* source, SacnSourceUniverse* universe)
 {
   // If 0x00 data is ready to send
   if (universe->has_level_data && ((universe->level_packets_sent_before_suppression < NUM_PRE_SUPPRESSION_PACKETS) ||
@@ -524,7 +491,7 @@ void update_levels(SacnSource* source_state, SacnSourceUniverse* universe_state,
   universe_state->has_level_data = true;
 #if SACN_ETC_PRIORITY_EXTENSION
   if (universe_state->has_pap_data)
-    zero_levels_where_paps_are_zero(universe_state);  // PAPs must already be updated!
+    zero_levels_where_pap_is_zero(universe_state);  // PAP must already be updated!
 #endif
 
   reset_transmission_suppression(source_state, universe_state, kResetLevel);
@@ -535,8 +502,8 @@ void update_levels(SacnSource* source_state, SacnSourceUniverse* universe_state,
 
 #if SACN_ETC_PRIORITY_EXTENSION
 // Needs lock
-void update_paps(SacnSource* source_state, SacnSourceUniverse* universe_state, const uint8_t* new_priorities,
-                 size_t new_priorities_size, force_sync_behavior_t force_sync)
+void update_pap(SacnSource* source_state, SacnSourceUniverse* universe_state, const uint8_t* new_priorities,
+                size_t new_priorities_size, force_sync_behavior_t force_sync)
 {
   update_send_buf_data(universe_state->pap_send_buf, new_priorities, (uint16_t)new_priorities_size, force_sync);
   universe_state->has_pap_data = true;
@@ -544,7 +511,7 @@ void update_paps(SacnSource* source_state, SacnSourceUniverse* universe_state, c
 }
 
 // Needs lock
-void zero_levels_where_paps_are_zero(SacnSourceUniverse* universe_state)
+void zero_levels_where_pap_is_zero(SacnSourceUniverse* universe_state)
 {
   uint16_t level_count = etcpal_unpack_u16b(&universe_state->level_send_buf[SACN_PROPERTY_VALUE_COUNT_OFFSET]) - 1;
   uint16_t pap_count = etcpal_unpack_u16b(&universe_state->pap_send_buf[SACN_PROPERTY_VALUE_COUNT_OFFSET]) - 1;
@@ -557,16 +524,16 @@ void zero_levels_where_paps_are_zero(SacnSourceUniverse* universe_state)
 #endif
 
 // Needs lock
-void update_levels_and_or_paps(SacnSource* source, SacnSourceUniverse* universe, const uint8_t* new_levels,
-                               size_t new_levels_size, const uint8_t* new_priorities, size_t new_priorities_size,
-                               force_sync_behavior_t force_sync)
+void update_levels_and_or_pap(SacnSource* source, SacnSourceUniverse* universe, const uint8_t* new_levels,
+                              size_t new_levels_size, const uint8_t* new_priorities, size_t new_priorities_size,
+                              force_sync_behavior_t force_sync)
 {
   if (source && universe)
   {
 #if SACN_ETC_PRIORITY_EXTENSION
-    // Make sure PAPs are updated before levels.
+    // Make sure PAP is updated before levels.
     if (new_priorities)
-      update_paps(source, universe, new_priorities, new_priorities_size, force_sync);
+      update_pap(source, universe, new_priorities, new_priorities_size, force_sync);
 #endif
     if (new_levels)
       update_levels(source, universe, new_levels, new_levels_size, force_sync);
@@ -739,9 +706,9 @@ void clear_source_netints(SacnSource* source)
 
 // Needs lock
 etcpal_error_t reset_source_universe_networking(SacnSource* source, SacnSourceUniverse* universe,
-                                                SacnMcastInterface* netints, size_t num_netints)
+                                                const SacnNetintConfig* netint_config)
 {
-  etcpal_error_t result = sacn_initialize_source_netints(&universe->netints, netints, num_netints);
+  etcpal_error_t result = sacn_initialize_source_netints(&universe->netints, netint_config);
 
   for (size_t k = 0; (result == kEtcPalErrOk) && (k < universe->netints.num_netints); ++k)
     result = add_sacn_source_netint(source, &universe->netints.netints[k]);
@@ -750,6 +717,45 @@ etcpal_error_t reset_source_universe_networking(SacnSource* source, SacnSourceUn
     reset_transmission_suppression(source, universe, kResetLevelAndPap);
 
   return result;
+}
+
+// Needs lock
+void finish_source_universe_termination(SacnSource* source, size_t index)
+{
+  SacnSourceUniverse* universe = &source->universes[index];
+
+  // Handle unicast destinations first
+  size_t initial_num_unicast_dests = universe->num_unicast_dests;  // Actual may change, so keep initial for iteration.
+  for (size_t i = 0; i < initial_num_unicast_dests; ++i)
+    finish_unicast_dest_termination(universe, initial_num_unicast_dests - 1 - i);
+
+  // Update num_active_universes if needed
+  if (IS_PART_OF_UNIVERSE_DISCOVERY(universe))
+    --source->num_active_universes;
+
+  if (universe->termination_state == kTerminatingAndRemoving)
+  {
+    // Update the netints tree
+    for (size_t i = 0; i < universe->netints.num_netints; ++i)
+      remove_from_source_netints(source, &universe->netints.netints[i]);
+
+    remove_sacn_source_universe(source, index);
+  }
+  else
+  {
+    reset_universe(universe);
+  }
+}
+
+// Needs lock
+void finish_unicast_dest_termination(SacnSourceUniverse* universe, size_t index)
+{
+  SacnUnicastDestination* dest = &universe->unicast_dests[index];
+
+  if (dest->termination_state == kTerminatingAndRemoving)
+    remove_sacn_unicast_dest(universe, index);
+  else
+    reset_unicast_dest(dest);
 }
 
 // Needs lock
@@ -821,3 +827,5 @@ void cancel_termination_if_not_removing(SacnSourceUniverse* universe)
     }
   }
 }
+
+#endif  // SACN_SOURCE_ENABLED

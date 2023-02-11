@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ DEFINE_FAKE_VOID_FUNC(sacn_source_state_deinit);
 DEFINE_FAKE_VALUE_FUNC(int, take_lock_and_process_sources, process_sources_behavior_t);
 DEFINE_FAKE_VALUE_FUNC(etcpal_error_t, initialize_source_thread);
 DEFINE_FAKE_VALUE_FUNC(sacn_source_t, get_next_source_handle);
-DEFINE_FAKE_VOID_FUNC(update_levels_and_or_paps, SacnSource*, SacnSourceUniverse*, const uint8_t*, size_t,
+DEFINE_FAKE_VOID_FUNC(update_levels_and_or_pap, SacnSource*, SacnSourceUniverse*, const uint8_t*, size_t,
                       const uint8_t*, size_t, force_sync_behavior_t);
 DEFINE_FAKE_VOID_FUNC(increment_sequence_number, SacnSourceUniverse*);
 DEFINE_FAKE_VOID_FUNC(send_universe_unicast, const SacnSource*, SacnSourceUniverse*, const uint8_t*);
@@ -44,7 +44,9 @@ DEFINE_FAKE_VALUE_FUNC(size_t, get_source_universe_netints, const SacnSourceUniv
 DEFINE_FAKE_VOID_FUNC(disable_pap_data, SacnSourceUniverse*);
 DEFINE_FAKE_VOID_FUNC(clear_source_netints, SacnSource*);
 DEFINE_FAKE_VALUE_FUNC(etcpal_error_t, reset_source_universe_networking, SacnSource*, SacnSourceUniverse*,
-                       SacnMcastInterface*, size_t);
+                       const SacnNetintConfig*);
+DEFINE_FAKE_VOID_FUNC(finish_source_universe_termination, SacnSource*, size_t);
+DEFINE_FAKE_VOID_FUNC(finish_unicast_dest_termination, SacnSourceUniverse*, size_t);
 
 void sacn_source_state_reset_all_fakes(void)
 {
@@ -53,7 +55,7 @@ void sacn_source_state_reset_all_fakes(void)
   RESET_FAKE(take_lock_and_process_sources);
   RESET_FAKE(initialize_source_thread);
   RESET_FAKE(get_next_source_handle);
-  RESET_FAKE(update_levels_and_or_paps);
+  RESET_FAKE(update_levels_and_or_pap);
   RESET_FAKE(increment_sequence_number);
   RESET_FAKE(send_universe_unicast);
   RESET_FAKE(send_universe_multicast);
@@ -70,4 +72,6 @@ void sacn_source_state_reset_all_fakes(void)
   RESET_FAKE(disable_pap_data);
   RESET_FAKE(clear_source_netints);
   RESET_FAKE(reset_source_universe_networking);
+  RESET_FAKE(finish_source_universe_termination);
+  RESET_FAKE(finish_unicast_dest_termination);
 }

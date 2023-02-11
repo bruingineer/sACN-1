@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -113,7 +113,7 @@ typedef struct SacnSourceUniverseConfig
   /********* Required values **********/
 
   /** The universe number. At this time, only values from 1 - 63999 are accepted.
-      You cannot have a source send more than one stream of values to a single universe. */
+      You cannot have a source send more than one stream of levels to a single universe. */
   uint16_t universe;
 
   /********* Optional values **********/
@@ -169,7 +169,7 @@ void sacn_source_destroy(sacn_source_t handle);
 etcpal_error_t sacn_source_change_name(sacn_source_t handle, const char* new_name);
 
 etcpal_error_t sacn_source_add_universe(sacn_source_t handle, const SacnSourceUniverseConfig* config,
-                                        SacnMcastInterface* netints, size_t num_netints);
+                                        const SacnNetintConfig* netint_config);
 void sacn_source_remove_universe(sacn_source_t handle, uint16_t universe);
 size_t sacn_source_get_universes(sacn_source_t handle, uint16_t* universes, size_t universes_size);
 
@@ -187,22 +187,23 @@ etcpal_error_t sacn_source_send_now(sacn_source_t handle, uint16_t universe, uin
                                     size_t buflen);
 etcpal_error_t sacn_source_send_synchronization(sacn_source_t handle, uint16_t universe);
 
-void sacn_source_update_values(sacn_source_t handle, uint16_t universe, const uint8_t* new_values,
-                               size_t new_values_size);
-void sacn_source_update_values_and_pap(sacn_source_t handle, uint16_t universe, const uint8_t* new_values,
-                                       size_t new_values_size, const uint8_t* new_priorities,
+void sacn_source_update_levels(sacn_source_t handle, uint16_t universe, const uint8_t* new_levels,
+                               size_t new_levels_size);
+void sacn_source_update_levels_and_pap(sacn_source_t handle, uint16_t universe, const uint8_t* new_levels,
+                                       size_t new_levels_size, const uint8_t* new_priorities,
                                        size_t new_priorities_size);
-void sacn_source_update_values_and_force_sync(sacn_source_t handle, uint16_t universe, const uint8_t* new_values,
-                                              size_t new_values_size);
-void sacn_source_update_values_and_pap_and_force_sync(sacn_source_t handle, uint16_t universe,
-                                                      const uint8_t* new_values, size_t new_values_size,
+void sacn_source_update_levels_and_force_sync(sacn_source_t handle, uint16_t universe, const uint8_t* new_levels,
+                                              size_t new_levels_size);
+void sacn_source_update_levels_and_pap_and_force_sync(sacn_source_t handle, uint16_t universe,
+                                                      const uint8_t* new_levels, size_t new_levels_size,
                                                       const uint8_t* new_priorities, size_t new_priorities_size);
 
 int sacn_source_process_manual(void);
 
-etcpal_error_t sacn_source_reset_networking(SacnMcastInterface* netints, size_t num_netints);
-etcpal_error_t sacn_source_reset_networking_per_universe(const SacnSourceUniverseNetintList* netint_lists,
-                                                         size_t num_netint_lists);
+etcpal_error_t sacn_source_reset_networking(const SacnNetintConfig* sys_netint_config);
+etcpal_error_t sacn_source_reset_networking_per_universe(const SacnNetintConfig* sys_netint_config,
+                                                         const SacnSourceUniverseNetintList* per_universe_netint_lists,
+                                                         size_t num_per_universe_netint_lists);
 
 size_t sacn_source_get_network_interfaces(sacn_source_t handle, uint16_t universe, EtcPalMcastNetintId* netints,
                                           size_t netints_size);

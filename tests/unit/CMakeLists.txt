@@ -1,5 +1,3 @@
-include(GoogleTest)
-
 set(UNIT_TEST_DIR ${CMAKE_CURRENT_LIST_DIR})
 set(UNIT_TEST_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
@@ -14,4 +12,3 @@ endfunction()
 add_subdirectory(utils)
 add_subdirectory(api)
 add_subdirectory(state)
-add_subdirectory(config)

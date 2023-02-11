@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,23 +27,26 @@
 extern "C" {
 #endif
 
-DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_sockets_init);
+DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_sockets_init, const SacnNetintConfig*);
 DECLARE_FAKE_VOID_FUNC(sacn_sockets_deinit);
-DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_sockets_reset_source);
-DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_sockets_reset_receiver);
-DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_sockets_reset_source_detector);
-DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_initialize_receiver_netints, SacnInternalNetintArray*, SacnMcastInterface*,
-                        size_t);
+DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_sockets_reset_source, const SacnNetintConfig*);
+DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_sockets_reset_receiver, const SacnNetintConfig*);
+DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_sockets_reset_source_detector, const SacnNetintConfig*);
+DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_initialize_receiver_netints, SacnInternalNetintArray*,
+                        const SacnNetintConfig*);
 DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_initialize_source_detector_netints, SacnInternalNetintArray*,
-                        SacnMcastInterface*, size_t);
-DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_initialize_source_netints, SacnInternalNetintArray*, SacnMcastInterface*,
-                        size_t);
+                        const SacnNetintConfig*);
+DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_initialize_source_netints, SacnInternalNetintArray*,
+                        const SacnNetintConfig*);
 DECLARE_FAKE_VOID_FUNC(sacn_get_mcast_addr, etcpal_iptype_t, uint16_t, EtcPalIpAddr*);
 DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_add_receiver_socket, sacn_thread_id_t, etcpal_iptype_t, uint16_t,
                         const EtcPalMcastNetintId*, size_t, etcpal_socket_t*);
-DECLARE_FAKE_VOID_FUNC(sacn_remove_receiver_socket, sacn_thread_id_t, etcpal_socket_t*, socket_close_behavior_t);
+DECLARE_FAKE_VOID_FUNC(sacn_remove_receiver_socket, sacn_thread_id_t, etcpal_socket_t*, uint16_t,
+                       const EtcPalMcastNetintId*, size_t, socket_cleanup_behavior_t);
 DECLARE_FAKE_VOID_FUNC(sacn_add_pending_sockets, SacnRecvThreadContext*);
 DECLARE_FAKE_VOID_FUNC(sacn_cleanup_dead_sockets, SacnRecvThreadContext*);
+DECLARE_FAKE_VOID_FUNC(sacn_subscribe_sockets, SacnRecvThreadContext*);
+DECLARE_FAKE_VOID_FUNC(sacn_unsubscribe_sockets, SacnRecvThreadContext*);
 DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_read, SacnRecvThreadContext*, SacnReadResult*);
 DECLARE_FAKE_VOID_FUNC(sacn_send_multicast, uint16_t, sacn_ip_support_t, const uint8_t*, const EtcPalMcastNetintId*);
 DECLARE_FAKE_VOID_FUNC(sacn_send_unicast, sacn_ip_support_t, const uint8_t*, const EtcPalIpAddr*);

@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,8 @@
 #include "sacn/private/mem.h"
 #include "sacn/private/receiver.h"
 #include "sacn/private/receiver_state.h"
+
+#if SACN_RECEIVER_ENABLED || DOXYGEN
 
 /*************************** Function definitions ****************************/
 
@@ -55,6 +57,8 @@ void sacn_receiver_config_init(SacnReceiverConfig* config)
   if (config)
   {
     memset(config, 0, sizeof(SacnReceiverConfig));
+    config->footprint.start_address = 1;
+    config->footprint.address_count = SACN_RECEIVER_MAX_FOOTPRINT;
     config->source_count_max = SACN_RECEIVER_INFINITE_SOURCES;
   }
 }
@@ -74,9 +78,8 @@ void sacn_receiver_config_init(SacnReceiverConfig* config)
  *
  * @param[in] config Configuration parameters for the sACN receiver to be created.
  * @param[out] handle Filled in on success with a handle to the sACN receiver.
- * @param[in, out] netints Optional. If non-NULL, this is the list of interfaces the application wants to use, and the
- * status codes are filled in.  If NULL, all available interfaces are tried.
- * @param[in, out] num_netints Optional. The size of netints, or 0 if netints is NULL.
+ * @param[in, out] netint_config Optional. If non-NULL, this is the list of interfaces the application wants to use, and
+ * the status codes are filled in.  If NULL, all available interfaces are tried.
  * @return #kEtcPalErrOk: Receiver created successfully.
  * @return #kEtcPalErrNoNetints: None of the network interfaces provided were usable by the library.
  * @return #kEtcPalErrInvalid: Invalid parameter provided.
@@ -87,7 +90,7 @@ void sacn_receiver_config_init(SacnReceiverConfig* config)
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
 etcpal_error_t sacn_receiver_create(const SacnReceiverConfig* config, sacn_receiver_t* handle,
-                                    SacnMcastInterface* netints, size_t num_netints)
+                                    const SacnNetintConfig* netint_config)
 {
   etcpal_error_t res = kEtcPalErrOk;
 
@@ -105,16 +108,17 @@ etcpal_error_t sacn_receiver_create(const SacnReceiverConfig* config, sacn_recei
     res = kEtcPalErrInvalid;
   }
 
-  if (sacn_lock())
+  if (res == kEtcPalErrOk)
   {
-    if (res == kEtcPalErrOk)
-      res = create_sacn_receiver(config, handle, netints, num_netints);
-
-    sacn_unlock();
-  }
-  else
-  {
-    res = kEtcPalErrSys;
+    if (sacn_lock())
+    {
+      res = create_sacn_receiver(config, handle, netint_config, NULL);
+      sacn_unlock();
+    }
+    else
+    {
+      res = kEtcPalErrSys;
+    }
   }
 
   return res;
@@ -139,16 +143,17 @@ etcpal_error_t sacn_receiver_destroy(sacn_receiver_t handle)
   if (!sacn_initialized())
     res = kEtcPalErrNotInit;
 
-  if (sacn_lock())
+  if (res == kEtcPalErrOk)
   {
-    if (res == kEtcPalErrOk)
+    if (sacn_lock())
+    {
       res = destroy_sacn_receiver(handle);
-
-    sacn_unlock();
-  }
-  else
-  {
-    res = kEtcPalErrSys;
+      sacn_unlock();
+    }
+    else
+    {
+      res = kEtcPalErrSys;
+    }
   }
 
   return res;
@@ -174,19 +179,60 @@ etcpal_error_t sacn_receiver_get_universe(sacn_receiver_t handle, uint16_t* univ
   else if (universe_id == NULL)
     res = kEtcPalErrInvalid;
 
-  if (sacn_lock())
+  if (res == kEtcPalErrOk)
   {
-    SacnReceiver* receiver = NULL;
-    if (res == kEtcPalErrOk)
+    if (sacn_lock())
+    {
+      SacnReceiver* receiver = NULL;
       res = lookup_receiver(handle, &receiver);
 
-    if (res == kEtcPalErrOk)
-      *universe_id = receiver->keys.universe;
+      if (res == kEtcPalErrOk)
+        *universe_id = receiver->keys.universe;
 
-    sacn_unlock();
+      sacn_unlock();
+    }
+    else
+    {
+      res = kEtcPalErrSys;
+    }
   }
 
   return res;
+}
+
+/**
+ * @brief Get the footprint within the universe on which a sACN receiver is currently listening.
+ *
+ * @todo At this time, custom footprints are not supported by this library, so the full 512-slot footprint is returned.
+ *
+ * @param[in] handle Handle to the receiver that we want to query.
+ * @param[out] footprint The retrieved footprint.
+ * @return #kEtcPalErrOk: Footprint retrieved successfully.
+ * @return #kEtcPalErrInvalid: Invalid parameter provided.
+ * @return #kEtcPalErrNotInit: Module not initialized.
+ * @return #kEtcPalErrNotFound: Handle does not correspond to a valid receiver.
+ * @return #kEtcPalErrSys: An internal library or system call error occurred.
+ */
+etcpal_error_t sacn_receiver_get_footprint(sacn_receiver_t handle, SacnRecvUniverseSubrange* footprint)
+{
+  etcpal_error_t result = kEtcPalErrOk;
+
+  if (!footprint)
+    result = kEtcPalErrInvalid;
+
+  if (result == kEtcPalErrOk)
+  {
+    uint16_t tmp = 0;
+    result = sacn_receiver_get_universe(handle, &tmp);
+  }
+
+  if (result == kEtcPalErrOk)
+  {
+    footprint->start_address = 1;
+    footprint->address_count = DMX_ADDRESS_COUNT;
+  }
+
+  return result;
 }
 
 /**
@@ -215,26 +261,70 @@ etcpal_error_t sacn_receiver_change_universe(sacn_receiver_t handle, uint16_t ne
   else if (!UNIVERSE_ID_VALID(new_universe_id))
     res = kEtcPalErrInvalid;
 
-  if (sacn_lock())
+  if (res == kEtcPalErrOk)
   {
-    if (res == kEtcPalErrOk)
+    if (sacn_lock())
+    {
       res = change_sacn_receiver_universe(handle, new_universe_id);
-
-    sacn_unlock();
-  }
-  else
-  {
-    res = kEtcPalErrSys;
+      sacn_unlock();
+    }
+    else
+    {
+      res = kEtcPalErrSys;
+    }
   }
 
   return res;
 }
 
 /**
- * @brief Resets the underlying network sockets and packet receipt state for all sACN receivers.
+ * @brief Change the footprint within the universe on which an sACN receiver is listening. TODO: Not yet implemented.
  *
- * This is typically used when the application detects that the list of networking interfaces has changed, and wants
- * every receiver to use the same network interfaces.
+ * After this call completes successfully, the receiver is in a sampling period for the new footprint and will provide
+ * SamplingPeriodStarted() and SamplingPeriodEnded() notifications, as well as UniverseData() notifications as packets
+ * are received for the new footprint.
+ *
+ * @param[in] handle Handle to the receiver for which to change the universe.
+ * @param[in] new_footprint New footprint that this receiver should listen to.
+ * @return #kEtcPalErrNotImpl: Not yet implemented.
+ */
+etcpal_error_t sacn_receiver_change_footprint(sacn_receiver_t handle, const SacnRecvUniverseSubrange* new_footprint)
+{
+  ETCPAL_UNUSED_ARG(handle);
+  ETCPAL_UNUSED_ARG(new_footprint);
+
+  return kEtcPalErrNotImpl;
+}
+
+/**
+ * @brief Change the universe and footprint on which an sACN receiver is listening. TODO: Not yet implemented.
+ *
+ * After this call completes successfully, the receiver is in a sampling period for the new footprint and will provide
+ * SamplingPeriodStarted() and SamplingPeriodEnded() notifications, as well as UniverseData() notifications as packets
+ * are received for the new footprint.
+ *
+ * @param[in] handle Handle to the receiver for which to change the universe.
+ * @param[in] new_universe_id New universe number that this receiver should listen to.
+ * @param[in] new_footprint New footprint within the universe.
+ * @return #kEtcPalErrNotImpl: Not yet implemented.
+ */
+etcpal_error_t sacn_receiver_change_universe_and_footprint(sacn_receiver_t handle, uint16_t new_universe_id,
+                                                           const SacnRecvUniverseSubrange* new_footprint)
+{
+  ETCPAL_UNUSED_ARG(handle);
+  ETCPAL_UNUSED_ARG(new_universe_id);
+  ETCPAL_UNUSED_ARG(new_footprint);
+
+  return kEtcPalErrNotImpl;
+}
+
+/**
+ * @brief Resets underlying network sockets and packet receipt state, determines network interfaces for all receivers.
+ *
+ * This is typically used when the application detects that the list of networking interfaces has changed. This changes
+ * the list of system interfaces the receiver API will be limited to (the list passed into sacn_init(), if any, is
+ * overridden for the receiver API, but not the other APIs). Then all receivers will be configured to use all of those
+ * interfaces.
  *
  * After this call completes successfully, every receiver is in a sampling period for their universes and will provide
  * SamplingPeriodStarted() and SamplingPeriodEnded() notifications, as well as UniverseData() notifications as packets
@@ -244,46 +334,52 @@ etcpal_error_t sacn_receiver_change_universe(sacn_receiver_t handle, uint16_t ne
  * Note that the networking reset is considered successful if it is able to successfully use any of the
  * network interfaces passed in. This will only return #kEtcPalErrNoNetints if none of the interfaces work.
  *
- * @param[in, out] netints If non-NULL, this is the list of interfaces the application wants to use, and the status
- * codes are filled in.  If NULL, all available interfaces are tried.
- * @param[in, out] num_netints The size of netints, or 0 if netints is NULL.
+ * @param[in, out] sys_netint_config Optional. If non-NULL, this is the list of system interfaces the receiver API will
+ * be limited to, and the status codes are filled in.  If NULL, the receiver API is allowed to use all available system
+ * interfaces.
  * @return #kEtcPalErrOk: Networking reset successfully.
  * @return #kEtcPalErrNoNetints: None of the network interfaces provided were usable by the library.
  * @return #kEtcPalErrNotInit: Module not initialized.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
-etcpal_error_t sacn_receiver_reset_networking(SacnMcastInterface* netints, size_t num_netints)
+etcpal_error_t sacn_receiver_reset_networking(const SacnNetintConfig* sys_netint_config)
 {
   etcpal_error_t res = kEtcPalErrOk;
 
   if (!sacn_initialized())
     res = kEtcPalErrNotInit;
 
-  if (sacn_lock())
+  if (res == kEtcPalErrOk)
   {
-    if (res == kEtcPalErrOk)
-      res = sacn_sockets_reset_receiver();
-
-    if (res == kEtcPalErrOk)
+    if (sacn_lock())
     {
-      // All current sockets need to be removed before adding new ones.
-      remove_all_receiver_sockets(kQueueSocketForClose);
+      res = sacn_sockets_reset_receiver(sys_netint_config);
 
-      EtcPalRbIter iter;
-      for (SacnReceiver* receiver = get_first_receiver(&iter); (res == kEtcPalErrOk) && receiver;
-           receiver = get_next_receiver(&iter))
+      if (res == kEtcPalErrOk)
       {
-        res = sacn_initialize_receiver_netints(&receiver->netints, netints, num_netints);
-        if (res == kEtcPalErrOk)
-          res = add_receiver_sockets(receiver);
-        if (res == kEtcPalErrOk)
-          res = clear_term_sets_and_sources(receiver);
-        if (res == kEtcPalErrOk)
-          begin_sampling_period(receiver);
-      }
-    }
+        // All current sockets need to be removed before adding new ones.
+        remove_all_receiver_sockets(kQueueSocketCleanup);
 
-    sacn_unlock();
+        EtcPalRbIter iter;
+        for (SacnReceiver* receiver = get_first_receiver(&iter); (res == kEtcPalErrOk) && receiver;
+             receiver = get_next_receiver(&iter))
+        {
+          res = sacn_initialize_receiver_netints(&receiver->netints, NULL);
+          if (res == kEtcPalErrOk)
+            res = add_receiver_sockets(receiver);
+          if (res == kEtcPalErrOk)
+            res = clear_term_sets_and_sources(receiver);
+          if (res == kEtcPalErrOk)
+            begin_sampling_period(receiver);
+        }
+      }
+
+      sacn_unlock();
+    }
+    else
+    {
+      res = kEtcPalErrSys;
+    }
   }
 
   return res;
@@ -292,8 +388,10 @@ etcpal_error_t sacn_receiver_reset_networking(SacnMcastInterface* netints, size_
 /**
  * @brief Resets underlying network sockets and packet receipt state, determines network interfaces for each receiver.
  *
- * This is typically used when the application detects that the list of networking interfaces has changed, and wants to
- * determine what the new network interfaces should be for each receiver.
+ * This is typically used when the application detects that the list of networking interfaces has changed. This changes
+ * the list of system interfaces the receiver API will be limited to (the list passed into sacn_init(), if any, is
+ * overridden for the receiver API, but not the other APIs). Then the network interfaces are specified for each
+ * receiver.
  *
  * After this call completes successfully, every receiver is in a sampling period for their universes and will provide
  * SamplingPeriodStarted() and SamplingPeriodEnded() notifications, as well as UniverseData() notifications as packets
@@ -304,77 +402,92 @@ etcpal_error_t sacn_receiver_reset_networking(SacnMcastInterface* netints, size_
  * interfaces passed in for each receiver. This will only return #kEtcPalErrNoNetints if none of the interfaces work for
  * a receiver.
  *
- * @param[in, out] netint_lists Lists of interfaces the application wants to use for each receiver. Must not be NULL.
- * Must include all receivers, and nothing more. The status codes are filled in whenever SacnReceiverNetintList::netints
- * is non-NULL.
- * @param[in] num_netint_lists The size of netint_lists. Must not be 0.
+ * @param[in, out] sys_netint_config Optional. If non-NULL, this is the list of system interfaces the receiver API will
+ * be limited to, and the status codes are filled in.  If NULL, the receiver API is allowed to use all available system
+ * interfaces.
+ * @param[in, out] per_receiver_netint_lists Lists of interfaces the application wants to use for each receiver. Must
+ * not be NULL. Must include all receivers, and nothing more. The status codes are filled in whenever
+ * SacnReceiverNetintList::netints is non-NULL.
+ * @param[in] num_per_receiver_netint_lists The size of netint_lists. Must not be 0.
  * @return #kEtcPalErrOk: Networking reset successfully.
  * @return #kEtcPalErrNoNetints: None of the network interfaces provided for a receiver were usable by the library.
  * @return #kEtcPalErrInvalid: Invalid parameter provided.
  * @return #kEtcPalErrNotInit: Module not initialized.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
-etcpal_error_t sacn_receiver_reset_networking_per_receiver(const SacnReceiverNetintList* netint_lists,
-                                                           size_t num_netint_lists)
+etcpal_error_t sacn_receiver_reset_networking_per_receiver(const SacnNetintConfig* sys_netint_config,
+                                                           const SacnReceiverNetintList* per_receiver_netint_lists,
+                                                           size_t num_per_receiver_netint_lists)
 {
   etcpal_error_t res = kEtcPalErrOk;
 
   if (!sacn_initialized())
     res = kEtcPalErrNotInit;
 
-  if ((netint_lists == NULL) || (num_netint_lists == 0))
+  if ((per_receiver_netint_lists == NULL) || (num_per_receiver_netint_lists == 0))
     res = kEtcPalErrInvalid;
 
-  if (sacn_lock())
+  if (res == kEtcPalErrOk)
   {
-    // Validate netint_lists. It must include all receivers and nothing more.
-    size_t total_num_receivers = 0;
-
-    EtcPalRbIter iter;
-    for (SacnReceiver* receiver = get_first_receiver(&iter); (res == kEtcPalErrOk) && receiver;
-         receiver = get_next_receiver(&iter))
+    if (sacn_lock())
     {
-      ++total_num_receivers;
+      // Validate netint_lists. It must include all receivers and nothing more.
+      size_t total_num_receivers = 0;
 
-      bool found = false;
-      for (size_t i = 0; !found && (i < num_netint_lists); ++i)
-        found = (receiver->keys.handle == netint_lists[i].handle);
-
-      if (!found)
-        res = kEtcPalErrInvalid;
-    }
-
-    if (res == kEtcPalErrOk)
-    {
-      if (num_netint_lists != total_num_receivers)
-        res = kEtcPalErrInvalid;
-    }
-
-    if (res == kEtcPalErrOk)
-      res = sacn_sockets_reset_receiver();
-
-    if (res == kEtcPalErrOk)
-    {
-      // All current sockets need to be removed before adding new ones.
-      remove_all_receiver_sockets(kQueueSocketForClose);
-
-      // After the old sockets have been removed, initialize the new netints, sockets, and state.
-      for (size_t i = 0; (res == kEtcPalErrOk) && (i < num_netint_lists); ++i)
+      EtcPalRbIter iter;
+      for (SacnReceiver* receiver = get_first_receiver(&iter); (res == kEtcPalErrOk) && receiver;
+           receiver = get_next_receiver(&iter))
       {
-        SacnReceiver* receiver = NULL;
-        lookup_receiver(netint_lists[i].handle, &receiver);
-        res =
-            sacn_initialize_receiver_netints(&receiver->netints, netint_lists[i].netints, netint_lists[i].num_netints);
-        if (res == kEtcPalErrOk)
-          res = add_receiver_sockets(receiver);
-        if (res == kEtcPalErrOk)
-          res = clear_term_sets_and_sources(receiver);
-        if (res == kEtcPalErrOk)
-          begin_sampling_period(receiver);
-      }
-    }
+        ++total_num_receivers;
 
-    sacn_unlock();
+        bool found = false;
+        for (size_t i = 0; !found && (i < num_per_receiver_netint_lists); ++i)
+          found = (receiver->keys.handle == per_receiver_netint_lists[i].handle);
+
+        if (!found)
+          res = kEtcPalErrInvalid;
+      }
+
+      if (res == kEtcPalErrOk)
+      {
+        if (num_per_receiver_netint_lists != total_num_receivers)
+          res = kEtcPalErrInvalid;
+      }
+
+      if (res == kEtcPalErrOk)
+        res = sacn_sockets_reset_receiver(sys_netint_config);
+
+      if (res == kEtcPalErrOk)
+      {
+        // All current sockets need to be removed before adding new ones.
+        remove_all_receiver_sockets(kQueueSocketCleanup);
+
+        // After the old sockets have been removed, initialize the new netints, sockets, and state.
+        for (size_t i = 0; (res == kEtcPalErrOk) && (i < num_per_receiver_netint_lists); ++i)
+        {
+          SacnReceiver* receiver = NULL;
+          lookup_receiver(per_receiver_netint_lists[i].handle, &receiver);
+
+          SacnNetintConfig receiver_netint_config;
+          receiver_netint_config.netints = per_receiver_netint_lists[i].netints;
+          receiver_netint_config.num_netints = per_receiver_netint_lists[i].num_netints;
+
+          res = sacn_initialize_receiver_netints(&receiver->netints, &receiver_netint_config);
+          if (res == kEtcPalErrOk)
+            res = add_receiver_sockets(receiver);
+          if (res == kEtcPalErrOk)
+            res = clear_term_sets_and_sources(receiver);
+          if (res == kEtcPalErrOk)
+            begin_sampling_period(receiver);
+        }
+      }
+
+      sacn_unlock();
+    }
+    else
+    {
+      res = kEtcPalErrSys;
+    }
   }
 
   return res;
@@ -456,10 +569,12 @@ uint32_t sacn_receiver_get_expired_wait()
 
 // Needs lock
 etcpal_error_t create_sacn_receiver(const SacnReceiverConfig* config, sacn_receiver_t* handle,
-                                    SacnMcastInterface* netints, size_t num_netints)
+                                    const SacnNetintConfig* netint_config,
+                                    const SacnReceiverInternalCallbacks* internal_callbacks)
 {
   SacnReceiver* receiver = NULL;
-  etcpal_error_t res = add_sacn_receiver(get_next_receiver_handle(), config, netints, num_netints, &receiver);
+  etcpal_error_t res =
+      add_sacn_receiver(get_next_receiver_handle(), config, netint_config, internal_callbacks, &receiver);
 
   if (res == kEtcPalErrOk)
   {
@@ -475,7 +590,7 @@ etcpal_error_t create_sacn_receiver(const SacnReceiverConfig* config, sacn_recei
   {
     if (receiver)
     {
-      remove_receiver_from_thread(receiver, kCloseSocketNow);
+      remove_receiver_from_thread(receiver);
       remove_sacn_receiver(receiver);
     }
   }
@@ -491,7 +606,7 @@ etcpal_error_t destroy_sacn_receiver(sacn_receiver_t handle)
 
   if (res == kEtcPalErrOk)
   {
-    remove_receiver_from_thread(receiver, kQueueSocketForClose);
+    remove_receiver_from_thread(receiver);
     remove_sacn_receiver(receiver);
   }
 
@@ -524,7 +639,7 @@ etcpal_error_t change_sacn_receiver_universe(sacn_receiver_t handle, uint16_t ne
   // Update the receiver's socket and subscription.
   if (res == kEtcPalErrOk)
   {
-    remove_receiver_sockets(receiver, kQueueSocketForClose);
+    remove_receiver_sockets(receiver, kQueueSocketCleanup);
     res = add_receiver_sockets(receiver);
   }
 
@@ -534,3 +649,5 @@ etcpal_error_t change_sacn_receiver_universe(sacn_receiver_t handle, uint16_t ne
 
   return res;
 }
+
+#endif  // SACN_RECEIVER_ENABLED || DOXYGEN

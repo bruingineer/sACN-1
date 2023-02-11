@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
  * https://github.com/ETCLabs/sACN
  *****************************************************************************/
 
-#include "sacn/cpp/common.h"
 #include "sacn/cpp/merge_receiver.h"
 
 #include <limits>
@@ -36,7 +35,6 @@
 #define TestMergeReceiver TestCppMergeReceiverStatic
 #endif
 
-
 class TestMergeReceiver : public ::testing::Test
 {
 protected:
@@ -47,14 +45,16 @@ protected:
     sacn_source_loss_reset_all_fakes();
     sacn_sockets_reset_all_fakes();
 
-    ASSERT_EQ(sacn_mem_init(1), kEtcPalErrOk);
+    ASSERT_EQ(sacn_receiver_mem_init(1), kEtcPalErrOk);
+    ASSERT_EQ(sacn_merge_receiver_mem_init(1), kEtcPalErrOk);
     ASSERT_EQ(sacn_merge_receiver_init(), kEtcPalErrOk);
   }
 
   void TearDown() override
   {
     sacn_merge_receiver_deinit();
-    sacn_mem_deinit();
+    sacn_merge_receiver_mem_deinit();
+    sacn_receiver_mem_deinit();
   }
 };
 

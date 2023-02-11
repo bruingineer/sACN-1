@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
  * https://github.com/ETCLabs/sACN
  *****************************************************************************/
 
-#include "sacn/cpp/common.h"
 #include "sacn/cpp/source.h"
 
 #include <limits>
@@ -103,10 +102,10 @@ protected:
       return kEtcPalErrOk;
     };
 
-    ASSERT_EQ(sacn_mem_init(1), kEtcPalErrOk);
+    ASSERT_EQ(sacn_source_mem_init(), kEtcPalErrOk);
   }
 
-  void TearDown() override { sacn_mem_deinit(); }
+  void TearDown() override { sacn_source_mem_deinit(); }
 };
 
 TEST_F(TestSource, SettingsConstructorWorks)
@@ -216,7 +215,7 @@ TEST_F(TestSource, ChangeNameWorks)
 TEST_F(TestSource, AddUniverseWorksWithoutNetints)
 {
   sacn_source_add_universe_fake.custom_fake = [](sacn_source_t handle, const SacnSourceUniverseConfig* config,
-                                                 SacnMcastInterface* netints, size_t num_netints) {
+                                                 const SacnNetintConfig* netint_config) {
     EXPECT_EQ(handle, kTestHandle);
     EXPECT_EQ(config->universe, kTestUniverse);
     EXPECT_EQ(config->priority, 100u);
@@ -225,8 +224,7 @@ TEST_F(TestSource, AddUniverseWorksWithoutNetints)
     EXPECT_EQ(config->unicast_destinations, nullptr);
     EXPECT_EQ(config->num_unicast_destinations, 0u);
     EXPECT_EQ(config->sync_universe, 0u);
-    EXPECT_EQ(netints, nullptr);
-    EXPECT_EQ(num_netints, 0u);
+    EXPECT_EQ(netint_config, nullptr);
     return kEtcPalErrOk;
   };
 
@@ -242,7 +240,7 @@ TEST_F(TestSource, AddUniverseWorksWithoutNetints)
 TEST_F(TestSource, AddUniverseWorksWithNetints)
 {
   sacn_source_add_universe_fake.custom_fake = [](sacn_source_t handle, const SacnSourceUniverseConfig* config,
-                                                 SacnMcastInterface* netints, size_t num_netints) {
+                                                 const SacnNetintConfig* netint_config) {
     EXPECT_EQ(handle, kTestHandle);
     EXPECT_EQ(config->universe, kTestUniverse);
     EXPECT_EQ(config->priority, 100u);
@@ -251,8 +249,12 @@ TEST_F(TestSource, AddUniverseWorksWithNetints)
     EXPECT_EQ(config->unicast_destinations, nullptr);
     EXPECT_EQ(config->num_unicast_destinations, 0u);
     EXPECT_EQ(config->sync_universe, 0u);
-    EXPECT_EQ(netints, kTestNetints.data());
-    EXPECT_EQ(num_netints, kTestNetints.size());
+    EXPECT_NE(netint_config, nullptr);
+    if (netint_config)
+    {
+      EXPECT_EQ(netint_config->netints, kTestNetints.data());
+      EXPECT_EQ(netint_config->num_netints, kTestNetints.size());
+    }
     return kEtcPalErrOk;
   };
 
@@ -508,7 +510,7 @@ TEST_F(TestSource, SendSynchronizationWorks)
 
 TEST_F(TestSource, UpdateValuesWorks)
 {
-  sacn_source_update_values_fake.custom_fake = [](sacn_source_t handle, uint16_t universe, const uint8_t* new_values,
+  sacn_source_update_levels_fake.custom_fake = [](sacn_source_t handle, uint16_t universe, const uint8_t* new_values,
                                                   size_t new_values_size) {
     EXPECT_EQ(handle, kTestHandle);
     EXPECT_EQ(universe, kTestUniverse);
@@ -519,13 +521,13 @@ TEST_F(TestSource, UpdateValuesWorks)
   sacn::Source source;
   source.Startup(sacn::Source::Settings(kTestLocalCid, kTestLocalName));
 
-  source.UpdateValues(kTestUniverse, kTestBuffer.data(), kTestBuffer.size());
-  EXPECT_EQ(sacn_source_update_values_fake.call_count, 1u);
+  source.UpdateLevels(kTestUniverse, kTestBuffer.data(), kTestBuffer.size());
+  EXPECT_EQ(sacn_source_update_levels_fake.call_count, 1u);
 }
 
 TEST_F(TestSource, UpdateValuesAndPapWorks)
 {
-  sacn_source_update_values_and_pap_fake.custom_fake = [](sacn_source_t handle, uint16_t universe,
+  sacn_source_update_levels_and_pap_fake.custom_fake = [](sacn_source_t handle, uint16_t universe,
                                                           const uint8_t* new_values, size_t new_values_size,
                                                           const uint8_t* new_priorities, size_t new_priorities_size) {
     EXPECT_EQ(handle, kTestHandle);
@@ -539,13 +541,14 @@ TEST_F(TestSource, UpdateValuesAndPapWorks)
   sacn::Source source;
   source.Startup(sacn::Source::Settings(kTestLocalCid, kTestLocalName));
 
-  source.UpdateValues(kTestUniverse, kTestBuffer.data(), kTestBuffer.size(), kTestBuffer2.data(), kTestBuffer2.size());
-  EXPECT_EQ(sacn_source_update_values_and_pap_fake.call_count, 1u);
+  source.UpdateLevelsAndPap(kTestUniverse, kTestBuffer.data(), kTestBuffer.size(), kTestBuffer2.data(),
+                            kTestBuffer2.size());
+  EXPECT_EQ(sacn_source_update_levels_and_pap_fake.call_count, 1u);
 }
 
 TEST_F(TestSource, UpdateValuesAndForceSyncWorks)
 {
-  sacn_source_update_values_and_force_sync_fake.custom_fake = [](sacn_source_t handle, uint16_t universe,
+  sacn_source_update_levels_and_force_sync_fake.custom_fake = [](sacn_source_t handle, uint16_t universe,
                                                                  const uint8_t* new_values, size_t new_values_size) {
     EXPECT_EQ(handle, kTestHandle);
     EXPECT_EQ(universe, kTestUniverse);
@@ -556,13 +559,13 @@ TEST_F(TestSource, UpdateValuesAndForceSyncWorks)
   sacn::Source source;
   source.Startup(sacn::Source::Settings(kTestLocalCid, kTestLocalName));
 
-  source.UpdateValuesAndForceSync(kTestUniverse, kTestBuffer.data(), kTestBuffer.size());
-  EXPECT_EQ(sacn_source_update_values_and_force_sync_fake.call_count, 1u);
+  source.UpdateLevelsAndForceSync(kTestUniverse, kTestBuffer.data(), kTestBuffer.size());
+  EXPECT_EQ(sacn_source_update_levels_and_force_sync_fake.call_count, 1u);
 }
 
 TEST_F(TestSource, UpdateValuesAndPapAndForceSyncWorks)
 {
-  sacn_source_update_values_and_pap_and_force_sync_fake.custom_fake =
+  sacn_source_update_levels_and_pap_and_force_sync_fake.custom_fake =
       [](sacn_source_t handle, uint16_t universe, const uint8_t* new_values, size_t new_values_size,
          const uint8_t* new_priorities, size_t new_priorities_size) {
         EXPECT_EQ(handle, kTestHandle);
@@ -576,9 +579,9 @@ TEST_F(TestSource, UpdateValuesAndPapAndForceSyncWorks)
   sacn::Source source;
   source.Startup(sacn::Source::Settings(kTestLocalCid, kTestLocalName));
 
-  source.UpdateValuesAndForceSync(kTestUniverse, kTestBuffer.data(), kTestBuffer.size(), kTestBuffer2.data(),
-                                  kTestBuffer2.size());
-  EXPECT_EQ(sacn_source_update_values_and_pap_and_force_sync_fake.call_count, 1u);
+  source.UpdateLevelsAndPapAndForceSync(kTestUniverse, kTestBuffer.data(), kTestBuffer.size(), kTestBuffer2.data(),
+                                        kTestBuffer2.size());
+  EXPECT_EQ(sacn_source_update_levels_and_pap_and_force_sync_fake.call_count, 1u);
 }
 
 TEST_F(TestSource, ProcessManualWorks)
@@ -592,9 +595,8 @@ TEST_F(TestSource, ProcessManualWorks)
 
 TEST_F(TestSource, ResetNetworkingWorksWithoutNetints)
 {
-  sacn_source_reset_networking_fake.custom_fake = [](SacnMcastInterface* netints, size_t num_netints) {
-    EXPECT_EQ(netints, nullptr);
-    EXPECT_EQ(num_netints, 0u);
+  sacn_source_reset_networking_fake.custom_fake = [](const SacnNetintConfig* netint_config) {
+    EXPECT_EQ(netint_config, nullptr);
     return kEtcPalErrOk;
   };
 
@@ -610,9 +612,13 @@ TEST_F(TestSource, ResetNetworkingWorksWithoutNetints)
 
 TEST_F(TestSource, ResetNetworkingWorksWithNetints)
 {
-  sacn_source_reset_networking_fake.custom_fake = [](SacnMcastInterface* netints, size_t num_netints) {
-    EXPECT_EQ(netints, kTestNetints.data());
-    EXPECT_EQ(num_netints, kTestNetints.size());
+  sacn_source_reset_networking_fake.custom_fake = [](const SacnNetintConfig* netint_config) {
+    EXPECT_NE(netint_config, nullptr);
+    if (netint_config)
+    {
+      EXPECT_EQ(netint_config->netints, kTestNetints.data());
+      EXPECT_EQ(netint_config->num_netints, kTestNetints.size());
+    }
     return kEtcPalErrOk;
   };
 
@@ -625,25 +631,25 @@ TEST_F(TestSource, ResetNetworkingWorksWithNetints)
 
 TEST_F(TestSource, ResetNetworkingPerUniverseWorks)
 {
-  sacn_source_reset_networking_per_universe_fake.custom_fake = [](const SacnSourceUniverseNetintList* netint_lists,
-                                                                  size_t num_netint_lists) {
-    EXPECT_EQ(num_netint_lists, kTestNetintLists.size());
+  sacn_source_reset_networking_per_universe_fake.custom_fake =
+      [](const SacnNetintConfig*, const SacnSourceUniverseNetintList* netint_lists, size_t num_netint_lists) {
+        EXPECT_EQ(num_netint_lists, kTestNetintLists.size());
 
-    for (size_t i = 0u; i < num_netint_lists; ++i)
-    {
-      EXPECT_EQ(netint_lists[i].handle, kTestNetintLists[i].handle);
-      EXPECT_EQ(netint_lists[i].universe, kTestNetintLists[i].universe);
-      EXPECT_EQ(netint_lists[i].netints, kTestNetintLists[i].netints.data());
-      EXPECT_EQ(netint_lists[i].num_netints, kTestNetintLists[i].netints.size());
-    }
+        for (size_t i = 0u; i < num_netint_lists; ++i)
+        {
+          EXPECT_EQ(netint_lists[i].handle, kTestNetintLists[i].handle);
+          EXPECT_EQ(netint_lists[i].universe, kTestNetintLists[i].universe);
+          EXPECT_EQ(netint_lists[i].netints, kTestNetintLists[i].netints.data());
+          EXPECT_EQ(netint_lists[i].num_netints, kTestNetintLists[i].netints.size());
+        }
 
-    return kEtcPalErrOk;
-  };
+        return kEtcPalErrOk;
+      };
 
   sacn::Source source;
   source.Startup(sacn::Source::Settings(kTestLocalCid, kTestLocalName));
 
-  EXPECT_EQ(source.ResetNetworking(kTestNetintLists).IsOk(), true);
+  EXPECT_EQ(source.ResetNetworking(kTestNetints, kTestNetintLists).IsOk(), true);
   EXPECT_EQ(sacn_source_reset_networking_per_universe_fake.call_count, 1u);
 }
 

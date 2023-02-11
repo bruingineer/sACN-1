@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@
 #include "sacn/private/pdu.h"
 
 #include "sacn/private/source_detector_state.h"
+
+#if SACN_SOURCE_DETECTOR_ENABLED
 
 /*********************** Private function prototypes *************************/
 
@@ -281,3 +283,5 @@ void process_universe_discovery_page(SacnSourceDetector* source_detector, const 
 
   CLEAR_BUF(&source_updated, sourced_universes);
 }
+
+#endif  // SACN_SOURCE_DETECTOR_ENABLED

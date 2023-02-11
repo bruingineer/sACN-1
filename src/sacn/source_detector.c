@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,8 @@
 #else
 #include "etcpal/mempool.h"
 #endif
+
+#if SACN_SOURCE_DETECTOR_ENABLED || DOXYGEN
 
 /*************************** Function definitions ****************************/
 
@@ -71,9 +73,8 @@ void sacn_source_detector_config_init(SacnSourceDetectorConfig* config)
  * network interfaces passed in.  This will only return #kEtcPalErrNoNetints if none of the interfaces work.
  *
  * @param[in] config Configuration parameters for the sACN source detector.
- * @param[in, out] netints Optional. If non-NULL, this is the list of interfaces the application wants to use, and the
- * status codes are filled in.  If NULL, all available interfaces are tried.
- * @param[in, out] num_netints Optional. The size of netints, or 0 if netints is NULL.
+ * @param[in, out] netint_config Optional. If non-NULL, this is the list of interfaces the application wants to use, and
+ * the status codes are filled in.  If NULL, all available interfaces are tried.
  * @return #kEtcPalErrOk: Detector created successfully.
  * @return #kEtcPalErrNoNetints: None of the network interfaces provided were usable by the library.
  * @return #kEtcPalErrInvalid: Invalid parameter provided.
@@ -81,8 +82,8 @@ void sacn_source_detector_config_init(SacnSourceDetectorConfig* config)
  * @return #kEtcPalErrNoMem: No room to allocate memory for the detector.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
-etcpal_error_t sacn_source_detector_create(const SacnSourceDetectorConfig* config, SacnMcastInterface* netints,
-                                           size_t num_netints)
+etcpal_error_t sacn_source_detector_create(const SacnSourceDetectorConfig* config,
+                                           const SacnNetintConfig* netint_config)
 {
   etcpal_error_t res = kEtcPalErrOk;
 
@@ -91,26 +92,28 @@ etcpal_error_t sacn_source_detector_create(const SacnSourceDetectorConfig* confi
   else if (!config || !config->callbacks.source_updated || !config->callbacks.source_expired)
     res = kEtcPalErrInvalid;
 
-  if (sacn_lock())
+  if (res == kEtcPalErrOk)
   {
-    SacnSourceDetector* source_detector = NULL;
-    if (res == kEtcPalErrOk)
-      res = add_sacn_source_detector(config, netints, num_netints, &source_detector);
-
-    if (res == kEtcPalErrOk)
-      res = assign_source_detector_to_thread(source_detector);
-
-    if ((res != kEtcPalErrOk) && source_detector)
+    if (sacn_lock())
     {
-      remove_source_detector_from_thread(source_detector, kCloseSocketNow);
-      remove_sacn_source_detector();
-    }
+      SacnSourceDetector* source_detector = NULL;
+      res = add_sacn_source_detector(config, netint_config, &source_detector);
 
-    sacn_unlock();
-  }
-  else
-  {
-    res = kEtcPalErrSys;
+      if (res == kEtcPalErrOk)
+        res = assign_source_detector_to_thread(source_detector);
+
+      if ((res != kEtcPalErrOk) && source_detector)
+      {
+        remove_source_detector_from_thread(source_detector);
+        remove_sacn_source_detector();
+      }
+
+      sacn_unlock();
+    }
+    else
+    {
+      res = kEtcPalErrSys;
+    }
   }
 
   return res;
@@ -127,7 +130,7 @@ void sacn_source_detector_destroy()
     SacnSourceDetector* detector = get_sacn_source_detector();
     if (detector)
     {
-      remove_source_detector_from_thread(detector, kQueueSocketForClose);
+      remove_source_detector_from_thread(detector);
       remove_sacn_source_detector();
     }
 
@@ -139,7 +142,10 @@ void sacn_source_detector_destroy()
  * @brief Updates the source detector system network interfaces. Also resets the underlying network sockets for the sACN
  * Source Detector if it was created.
  *
- * This is typically used when the application detects that the list of networking interfaces has changed.
+ * This is typically used when the application detects that the list of networking interfaces has changed. This changes
+ * the list of system interfaces the source detector API will be limited to (the list passed into sacn_init(), if any,
+ * is overridden for the source detector API, but not the other APIs). The source detector is then set to those
+ * interfaces.
  *
  * After this call completes successfully, the detector will continue as if nothing had changed. New sources could be
  * discovered, or old sources could expire.
@@ -149,42 +155,48 @@ void sacn_source_detector_destroy()
  * Note that the networking reset is considered successful if it is able to successfully use any of the
  * network interfaces passed in.  This will only return #kEtcPalErrNoNetints if none of the interfaces work.
  *
- * @param[in, out] netints Optional. If non-NULL, this is the list of interfaces the application wants to use, and the
- * status codes are filled in.  If NULL, all available interfaces are tried.
- * @param[in, out] num_netints Optional. The size of netints, or 0 if netints is NULL.
+ * @param[in, out] sys_netint_config Optional. If non-NULL, this is the list of system interfaces the source detector
+ * API will be limited to, and the status codes are filled in.  If NULL, the source detector API is allowed to use all
+ * available system interfaces.
  * @return #kEtcPalErrOk: Network changed successfully.
  * @return #kEtcPalErrNoNetints: None of the network interfaces provided were usable by the library.
  * @return #kEtcPalErrInvalid: Invalid parameter provided.
  * @return #kEtcPalErrNotInit: Module not initialized.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
-etcpal_error_t sacn_source_detector_reset_networking(SacnMcastInterface* netints, size_t num_netints)
+etcpal_error_t sacn_source_detector_reset_networking(const SacnNetintConfig* sys_netint_config)
 {
   etcpal_error_t res = kEtcPalErrOk;
 
   if (!sacn_initialized())
     res = kEtcPalErrNotInit;
 
-  if (sacn_lock())
+  if (res == kEtcPalErrOk)
   {
-    if (res == kEtcPalErrOk)
-      res = sacn_sockets_reset_source_detector();
-
-    if (res == kEtcPalErrOk)
+    if (sacn_lock())
     {
-      SacnSourceDetector* detector = get_sacn_source_detector();
-      if (detector)
+      res = sacn_sockets_reset_source_detector(sys_netint_config);
+
+      if (res == kEtcPalErrOk)
       {
-        // All current sockets need to be removed before adding new ones.
-        remove_source_detector_sockets(detector, kQueueSocketForClose);
+        SacnSourceDetector* detector = get_sacn_source_detector();
+        if (detector)
+        {
+          // All current sockets need to be removed before adding new ones.
+          remove_source_detector_sockets(detector, kQueueSocketCleanup);
 
-        res = sacn_initialize_source_detector_netints(&detector->netints, netints, num_netints);
-        if (res == kEtcPalErrOk)
-          res = add_source_detector_sockets(detector);
+          res = sacn_initialize_source_detector_netints(&detector->netints, NULL);
+          if (res == kEtcPalErrOk)
+            res = add_source_detector_sockets(detector);
+        }
       }
-    }
 
-    sacn_unlock();
+      sacn_unlock();
+    }
+    else
+    {
+      res = kEtcPalErrSys;
+    }
   }
 
   return res;
@@ -214,3 +226,5 @@ size_t sacn_source_detector_get_network_interfaces(EtcPalMcastNetintId* netints,
 
   return total_num_network_interfaces;
 }
+
+#endif  // SACN_SOURCE_DETECTOR_ENABLED || DOXYGEN

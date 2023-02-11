@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -171,9 +171,11 @@ static etcpal_error_t create_listener(ListeningUniverse* listener, uint16_t univ
     netints[i].iface.ip_type = netint_list[i].addr.type;
   }
 
-  etcpal_error_t result =
-      sacn_receiver_create(&config, &listener->receiver_handle, netints,
-                           (num_sys_netints < MAX_LISTENER_NETINTS) ? num_sys_netints : MAX_LISTENER_NETINTS);
+  SacnNetintConfig netint_config;
+  netint_config.netints = netints;
+  netint_config.num_netints = (num_sys_netints < MAX_LISTENER_NETINTS) ? num_sys_netints : MAX_LISTENER_NETINTS;
+
+  etcpal_error_t result = sacn_receiver_create(&config, &listener->receiver_handle, &netint_config);
   if (result == kEtcPalErrOk)
   {
     listener->universe = universe;
@@ -388,11 +390,11 @@ static etcpal_error_t console_change_listening_universe(const SacnReceiverCallba
  * and store the first few slots.
  */
 static void handle_universe_data(sacn_receiver_t receiver_handle, const EtcPalSockAddr* source_addr,
-                                 const SacnHeaderData* header, const uint8_t* pdata, bool is_sampling, void* context)
+                                 const SacnRemoteSource* source_info, const SacnRecvUniverseData* universe_data,
+                                 void* context)
 {
   ETCPAL_UNUSED_ARG(receiver_handle);
   ETCPAL_UNUSED_ARG(source_addr);
-  ETCPAL_UNUSED_ARG(is_sampling);
 
   if (etcpal_mutex_lock(&mutex))
   {
@@ -400,15 +402,15 @@ static void handle_universe_data(sacn_receiver_t receiver_handle, const EtcPalSo
     assert(listener);
 
     // Get the source state to update.
-    SourceData* source = find_source(listener, &header->cid);
+    SourceData* source = find_source(listener, &source_info->cid);
     if (source == NULL)
     {
       // See if there's room for new source data
       source = find_source_hole(listener);
       if (source)
       {
-        source->cid = header->cid;
-        strcpy(source->name, header->source_name);
+        source->cid = source_info->cid;
+        strcpy(source->name, source_info->name);
         source->num_updates = 0;
         source->update_start_time_ms = etcpal_getms();
         source->valid = true;
@@ -416,16 +418,18 @@ static void handle_universe_data(sacn_receiver_t receiver_handle, const EtcPalSo
       }
       else
       {
-        printf("No room to track new source on universe %u\n", header->universe_id);
+        printf("No room to track new source on universe %u\n", universe_data->universe_id);
       }
     }
 
     if (source)
     {
       ++source->num_updates;
-      source->priority = header->priority;
-      size_t values_len = (header->slot_count < NUM_SLOTS_DISPLAYED) ? header->slot_count : NUM_SLOTS_DISPLAYED;
-      memcpy(source->last_update, pdata, values_len);
+      source->priority = universe_data->priority;
+      size_t values_len = (universe_data->slot_range.address_count < NUM_SLOTS_DISPLAYED)
+                              ? universe_data->slot_range.address_count
+                              : NUM_SLOTS_DISPLAYED;
+      memcpy(source->last_update, universe_data->values, values_len);
       memset(source->last_update + values_len, 0, NUM_SLOTS_DISPLAYED - values_len);
     }
 
@@ -559,7 +563,7 @@ int main(void)
   log_params.time_fn = NULL;
   log_params.log_mask = ETCPAL_LOG_UPTO(ETCPAL_LOG_DEBUG);
 
-  etcpal_error_t sacn_init_result = sacn_init(&log_params);
+  etcpal_error_t sacn_init_result = sacn_init(&log_params, NULL);
   if (sacn_init_result != kEtcPalErrOk)
   {
     printf("sACN initialization failed with error: '%s'\n", etcpal_strerror(sacn_init_result));

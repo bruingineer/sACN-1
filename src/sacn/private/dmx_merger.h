@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@
 #include <stdint.h>
 #include "sacn/dmx_merger.h"
 #include "sacn/private/util.h"
+#include "etcpal/handle_manager.h"
 #include "etcpal/rbtree.h"
 
 #ifdef __cplusplus
@@ -40,7 +41,8 @@ typedef struct SourceState
 {
   sacn_dmx_merger_source_t handle;  // This must be the first struct member.
   SacnDmxMergerSource source;
-  bool has_universe_priority;
+  size_t pap_count;
+  bool universe_priority_uninitialized;
 } SourceState;
 
 typedef struct MergerState
@@ -49,8 +51,14 @@ typedef struct MergerState
   IntHandleManager source_handle_mgr;
   EtcPalRbTree source_state_lookup;
   SacnDmxMergerConfig config;
-  uint8_t winning_priorities[DMX_ADDRESS_COUNT];        // These have not been converted to PAPs.
-  sacn_dmx_merger_source_t winning_sources[DMX_ADDRESS_COUNT];  // This is needed if config.slot_owners is NULL.
+
+  /* If a merger config is passed in with per_address_priorities set to NULL, config.per_address_priorities will be set
+   * to point to this so that the winning priorities can still be tracked. */
+  uint8_t pap_internal[DMX_ADDRESS_COUNT];
+
+  /* If a merger config is passed in with owners set to NULL, config.owners will be set to point to this so that the
+   * merge winners can still be tracked. */
+  sacn_dmx_merger_source_t owners_internal[DMX_ADDRESS_COUNT];
 } MergerState;
 
 etcpal_error_t sacn_dmx_merger_init();
@@ -68,11 +76,11 @@ etcpal_error_t add_sacn_dmx_merger_source_with_handle(sacn_dmx_merger_t merger, 
 
 etcpal_error_t update_sacn_dmx_merger_levels(sacn_dmx_merger_t merger, sacn_dmx_merger_source_t source,
                                              const uint8_t* new_levels, size_t new_levels_count);
-etcpal_error_t update_sacn_dmx_merger_paps(sacn_dmx_merger_t merger, sacn_dmx_merger_source_t source, const uint8_t* paps,
-                                           size_t paps_count);
+etcpal_error_t update_sacn_dmx_merger_pap(sacn_dmx_merger_t merger, sacn_dmx_merger_source_t source, const uint8_t* pap,
+                                          size_t pap_count);
 etcpal_error_t update_sacn_dmx_merger_universe_priority(sacn_dmx_merger_t merger, sacn_dmx_merger_source_t source,
                                                         uint8_t universe_priority);
-etcpal_error_t remove_sacn_dmx_merger_paps(sacn_dmx_merger_t merger, sacn_dmx_merger_source_t source);
+etcpal_error_t remove_sacn_dmx_merger_pap(sacn_dmx_merger_t merger, sacn_dmx_merger_source_t source);
 
 #ifdef __cplusplus
 }

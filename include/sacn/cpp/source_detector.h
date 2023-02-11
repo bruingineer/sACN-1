@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,8 @@
  * @brief C++ wrapper for the sACN Source Detector API
  */
 
+#include "sacn/cpp/common.h"
+
 #include <vector>
 
 #include "sacn/source_detector.h"
@@ -32,10 +34,10 @@
 #include "etcpal/cpp/uuid.h"
 
 /**
-* @defgroup sacn_source_detector_cpp sACN Source Detector API
-* @ingroup sacn_cpp_api
-* @brief A C++ wrapper for the sACN Source Detector API
-*/
+ * @defgroup sacn_source_detector_cpp sACN Source Detector API
+ * @ingroup sacn_cpp_api
+ * @brief A C++ wrapper for the sACN Source Detector API
+ */
 
 namespace sacn
 {
@@ -48,7 +50,7 @@ namespace sacn
  *
  * There can only ever be one instance of the source detector (thus the static interface), but that instance still needs
  * to be created and can be destroyed.
- * 
+ *
  * Usage:
  * @code
  * #include "sacn/cpp/source_detector.h"
@@ -59,7 +61,7 @@ namespace sacn
  * etcpal::Error init_result = sacn::Init(&log_params);
  * // Or, to init without worrying about logs from the sACN library...
  * etcpal::Error init_result = sacn::Init();
- * 
+ *
  * std::vector<SacnMcastInterface> my_netints;
  * // Assuming my_netints is initialized by the application...
  *
@@ -70,16 +72,16 @@ namespace sacn
  * // Or, if you just want to use all network interfaces:
  * etcpal::Error startup_result = sacn::SourceDetector::Startup(my_notify);
  * // Check startup_result here...
- * 
+ *
  * // Now the thread is running and your callbacks will handle application-side processing.
- * 
+ *
  * // What if your network interfaces change? Update my_netints and call this:
  * etcpal::Error reset_result = sacn::SourceDetector::ResetNetworking(my_netints);
  * // Check reset_result here...
- * 
+ *
  * // To destroy the source detector, call this:
  * sacn::SourceDetector::Shutdown();
- * 
+ *
  * // During application shutdown, everything can be cleaned up by calling sacn::Deinit.
  * sacn::Deinit();
  * @endcode
@@ -87,7 +89,7 @@ namespace sacn
  * Callback demonstrations:
  * @code
  * void MyNotifyHandler::HandleSourceUpdated(sacn::RemoteSourceHandle handle, const etcpal::Uuid& cid,
-                                             const std::string& name, const std::vector<uint16_t>& sourced_universes)
+ *                                           const std::string& name, const std::vector<uint16_t>& sourced_universes)
  * {
  *   std::cout << "Source Detector: Source " << cid.ToString() << " (name " << name << ") ";
  *   if(!sourced_universes.empty())
@@ -119,7 +121,6 @@ namespace sacn
 class SourceDetector
 {
 public:
-
   /**
    * @ingroup sacn_source_detector_cpp
    * @brief A base class for a class that receives notification callbacks from a sACN Source Detector.
@@ -171,7 +172,7 @@ public:
      * This callback is rate-limited: it will only be called the first time a source or universe limit is exceeded.
      * After that, it will not be called until the number of sources or universes has dropped below their limit and hits
      * it again.
-     * 
+     *
      */
     virtual void HandleMemoryLimitExceeded() {}
   };
@@ -348,14 +349,15 @@ inline etcpal::Error SourceDetector::Startup(const Settings& settings, NotifyHan
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
 inline etcpal::Error SourceDetector::Startup(const Settings& settings, NotifyHandler& notify_handler,
-                                                std::vector<SacnMcastInterface>& netints)
+                                             std::vector<SacnMcastInterface>& netints)
 {
   SacnSourceDetectorConfig config = TranslateConfig(settings, notify_handler);
 
   if (netints.empty())
-    return sacn_source_detector_create(&config, NULL, 0);
+    return sacn_source_detector_create(&config, NULL);
 
-  return sacn_source_detector_create(&config, netints.data(), netints.size());
+  SacnNetintConfig netint_config = {netints.data(), netints.size()};
+  return sacn_source_detector_create(&config, &netint_config);
 }
 
 /**
@@ -375,8 +377,10 @@ inline void SourceDetector::Shutdown()
  * @brief Resets the underlying network sockets and packet receipt state for the sACN Source Detector.
  *
  * This is an override of ResetNetworking that uses all network interfaces.
- * 
- * This is typically used when the application detects that the list of networking interfaces has changed.
+ *
+ * This is typically used when the application detects that the list of networking interfaces has changed. The source
+ * detector API will no longer be limited to specific interfaces (the list passed into sacn::Init(), if any, is
+ * overridden for the source detector API, but not the other APIs). The source detector is set to all system interfaces.
  *
  * After this call completes successfully, the detector will continue as if nothing had changed. New sources could be
  * discovered, or old sources could expire.
@@ -401,7 +405,10 @@ inline etcpal::Error SourceDetector::ResetNetworking()
 /**
  * @brief Resets the underlying network sockets and packet receipt state for the sACN Source Detector.
  *
- * This is typically used when the application detects that the list of networking interfaces has changed.
+ * This is typically used when the application detects that the list of networking interfaces has changed. This changes
+ * the list of system interfaces the source detector API will be limited to (the list passed into sacn::Init(), if any,
+ * is overridden for the source detector API, but not the other APIs). The source detector is then set to those
+ * interfaces.
  *
  * After this call completes successfully, the detector will continue as if nothing had changed. New sources could be
  * discovered, or old sources could expire.
@@ -410,8 +417,8 @@ inline etcpal::Error SourceDetector::ResetNetworking()
  * Note that the networking reset is considered successful if it is able to successfully use any of the
  * network interfaces passed in.  This will only return #kEtcPalErrNoNetints if none of the interfaces work.
  *
- * @param[in, out] netints Optional. If !empty, this is the list of interfaces the application wants to use, and the
- * status codes are filled in.  If empty, all available interfaces are tried and this vector isn't modified.
+ * @param sys_netints If !empty, this is the list of system interfaces the source detector API will be limited to, and
+ * the status codes are filled in.  If empty, the source detector API is allowed to use all available system interfaces.
  * @return #kEtcPalErrOk: Network changed successfully.
  * @return #kEtcPalErrNoNetints: None of the network interfaces provided were usable by the library.
  * @return #kEtcPalErrInvalid: Invalid parameter provided.
@@ -419,12 +426,17 @@ inline etcpal::Error SourceDetector::ResetNetworking()
  * @return #kEtcPalErrNotFound: The detector has not yet been created.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
-inline etcpal::Error SourceDetector::ResetNetworking(std::vector<SacnMcastInterface>& netints)
+inline etcpal::Error SourceDetector::ResetNetworking(std::vector<SacnMcastInterface>& sys_netints)
 {
-  if (netints.empty())
-    return sacn_source_detector_reset_networking(nullptr, 0);
+  if (sys_netints.empty())
+  {
+    return sacn_source_detector_reset_networking(nullptr);
+  }
   else
-    return sacn_source_detector_reset_networking(netints.data(), netints.size());
+  {
+    SacnNetintConfig netint_config = {sys_netints.data(), sys_netints.size()};
+    return sacn_source_detector_reset_networking(&netint_config);
+  }
 }
 
 /**

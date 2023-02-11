@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -64,7 +64,8 @@ protected:
     RESET_FAKE(source_expired);
     RESET_FAKE(limit_exceeded);
 
-    ASSERT_EQ(sacn_mem_init(1), kEtcPalErrOk);
+    ASSERT_EQ(sacn_receiver_mem_init(1), kEtcPalErrOk);
+    ASSERT_EQ(sacn_source_detector_mem_init(), kEtcPalErrOk);
     ASSERT_EQ(sacn_source_detector_state_init(), kEtcPalErrOk);
 
     CreateDetector(kTestMaxSources, kTestMaxUniverses);
@@ -75,7 +76,8 @@ protected:
     DestroyDetector();
 
     sacn_source_detector_state_deinit();
-    sacn_mem_deinit();
+    sacn_source_detector_mem_deinit();
+    sacn_receiver_mem_deinit();
   }
 
   etcpal::Error CreateDetector(int source_count_max, int universes_per_source_max)
@@ -87,7 +89,7 @@ protected:
     config.source_count_max = source_count_max;
     config.universes_per_source_max = universes_per_source_max;
 
-    return add_sacn_source_detector(&config, nullptr, 0, &detector_);
+    return add_sacn_source_detector(&config, nullptr, &detector_);
   }
 
   void DestroyDetector()
@@ -196,8 +198,7 @@ TEST_F(TestSourceDetectorState, SourceUpdatedWorks)
   EXPECT_EQ(source_updated_fake.call_count, 1u);
 
   source_updated_fake.custom_fake = [](sacn_remote_source_t, const EtcPalUuid* cid, const char* name,
-                                       const uint16_t* sourced_universes,
-                                       size_t num_sourced_universes, void* context) {
+                                       const uint16_t* sourced_universes, size_t num_sourced_universes, void* context) {
     EXPECT_EQ(ETCPAL_UUID_CMP(cid, &test_cid.get()), 0);
     EXPECT_EQ(strcmp(name, kTestName.c_str()), 0);
 
@@ -227,8 +228,7 @@ TEST_F(TestSourceDetectorState, SourceUpdatedFiltersDroppedLists)
     universe_list.push_back(universe);
 
   source_updated_fake.custom_fake = [](sacn_remote_source_t, const EtcPalUuid*, const char*,
-                                       const uint16_t* sourced_universes,
-                                       size_t num_sourced_universes, void*) {
+                                       const uint16_t* sourced_universes, size_t num_sourced_universes, void*) {
     for (size_t i = 0u; i < num_sourced_universes; ++i)
       EXPECT_EQ(sourced_universes[i], universe_list[i]);
 

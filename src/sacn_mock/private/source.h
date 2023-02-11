@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ DECLARE_FAKE_VOID_FUNC(sacn_source_destroy, sacn_source_t);
 DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_source_change_name, sacn_source_t, const char*);
 
 DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_source_add_universe, sacn_source_t, const SacnSourceUniverseConfig*,
-                        SacnMcastInterface*, size_t);
+                        const SacnNetintConfig*);
 DECLARE_FAKE_VOID_FUNC(sacn_source_remove_universe, sacn_source_t, uint16_t);
 DECLARE_FAKE_VALUE_FUNC(size_t, sacn_source_get_universes, sacn_source_t, uint16_t*, size_t);
 
@@ -59,18 +59,18 @@ DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_source_change_synchronization_unive
 DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_source_send_now, sacn_source_t, uint16_t, uint8_t, const uint8_t*, size_t);
 DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_source_send_synchronization, sacn_source_t, uint16_t);
 
-DECLARE_FAKE_VOID_FUNC(sacn_source_update_values, sacn_source_t, uint16_t, const uint8_t*, size_t);
-DECLARE_FAKE_VOID_FUNC(sacn_source_update_values_and_pap, sacn_source_t, uint16_t, const uint8_t*, size_t,
+DECLARE_FAKE_VOID_FUNC(sacn_source_update_levels, sacn_source_t, uint16_t, const uint8_t*, size_t);
+DECLARE_FAKE_VOID_FUNC(sacn_source_update_levels_and_pap, sacn_source_t, uint16_t, const uint8_t*, size_t,
                        const uint8_t*, size_t);
-DECLARE_FAKE_VOID_FUNC(sacn_source_update_values_and_force_sync, sacn_source_t, uint16_t, const uint8_t*, size_t);
-DECLARE_FAKE_VOID_FUNC(sacn_source_update_values_and_pap_and_force_sync, sacn_source_t, uint16_t, const uint8_t*,
+DECLARE_FAKE_VOID_FUNC(sacn_source_update_levels_and_force_sync, sacn_source_t, uint16_t, const uint8_t*, size_t);
+DECLARE_FAKE_VOID_FUNC(sacn_source_update_levels_and_pap_and_force_sync, sacn_source_t, uint16_t, const uint8_t*,
                        size_t, const uint8_t*, size_t);
 
 DECLARE_FAKE_VALUE_FUNC(int, sacn_source_process_manual);
 
-DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_source_reset_networking, SacnMcastInterface*, size_t);
-DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_source_reset_networking_per_universe, const SacnSourceUniverseNetintList*,
-                        size_t);
+DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_source_reset_networking, const SacnNetintConfig*);
+DECLARE_FAKE_VALUE_FUNC(etcpal_error_t, sacn_source_reset_networking_per_universe, const SacnNetintConfig*,
+                        const SacnSourceUniverseNetintList*, size_t);
 
 DECLARE_FAKE_VALUE_FUNC(size_t, sacn_source_get_network_interfaces, sacn_source_t, uint16_t, EtcPalMcastNetintId*,
                         size_t);

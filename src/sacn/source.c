@@ -1,5 +1,5 @@
 /******************************************************************************
- * Copyright 2021 ETC Inc.
+ * Copyright 2022 ETC Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,11 +24,13 @@
 #include "sacn/private/mem.h"
 #include "sacn/private/pdu.h"
 
-/****************************** Private macros *******************************/
+#if SACN_SOURCE_ENABLED || DOXYGEN
 
-/**************************** Private variables ******************************/
+/**************************** Private function declarations ******************************/
 
-/*********************** Private function prototypes *************************/
+static size_t get_per_universe_netint_lists_index(sacn_source_t source, uint16_t universe,
+                                                  const SacnSourceUniverseNetintList* per_universe_netint_lists,
+                                                  size_t num_per_universe_netint_lists, bool* found);
 
 /*************************** Function definitions ****************************/
 
@@ -85,7 +87,7 @@ void sacn_source_universe_config_init(SacnSourceUniverseConfig* config)
  *
  * This creates the instance of the source and begins sending universe discovery packets for it (which will list no
  * universes until start code data begins transmitting). No start code data is sent until sacn_source_add_universe() and
- * a variant of sacn_source_update_values() is called.
+ * a variant of sacn_source_update_levels() is called.
  *
  * @param[in] config Configuration parameters for the sACN source to be created. If any of these parameters are invalid,
  * #kEtcPalErrInvalid will be returned. This includes if the source name's length (including the null terminator) is
@@ -100,7 +102,6 @@ void sacn_source_universe_config_init(SacnSourceUniverseConfig* config)
  */
 etcpal_error_t sacn_source_create(const SacnSourceConfig* config, sacn_source_t* handle)
 {
-#if SACN_SOURCE_ENABLED
   etcpal_error_t result = kEtcPalErrOk;
 
   // Verify module initialized.
@@ -117,33 +118,32 @@ etcpal_error_t sacn_source_create(const SacnSourceConfig* config, sacn_source_t*
     }
   }
 
-  if (sacn_lock())
+  if (result == kEtcPalErrOk)
   {
-    // If the Tick thread hasn't been started yet, start it if the config isn't manual.
-    if (result == kEtcPalErrOk)
+    if (sacn_lock())
     {
+      // If the Tick thread hasn't been started yet, start it if the config isn't manual.
       if (!config->manually_process_source)
         result = initialize_source_thread();
+
+      // Initialize the source's state.
+      SacnSource* source = NULL;
+      if (result == kEtcPalErrOk)
+        result = add_sacn_source(get_next_source_handle(), config, &source);
+
+      // Initialize the handle on success.
+      if (result == kEtcPalErrOk)
+        *handle = source->handle;
+
+      sacn_unlock();
     }
-
-    // Initialize the source's state.
-    SacnSource* source = NULL;
-    if (result == kEtcPalErrOk)
-      result = add_sacn_source(get_next_source_handle(), config, &source);
-
-    // Initialize the handle on success.
-    if (result == kEtcPalErrOk)
-      *handle = source->handle;
-
-    sacn_unlock();
+    else
+    {
+      result = kEtcPalErrSys;
+    }
   }
 
   return result;
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(config);
-  ETCPAL_UNUSED_ARG(handle);
-  return kEtcPalErrNotImpl;
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
@@ -167,8 +167,6 @@ etcpal_error_t sacn_source_create(const SacnSourceConfig* config, sacn_source_t*
  */
 etcpal_error_t sacn_source_change_name(sacn_source_t handle, const char* new_name)
 {
-#if SACN_SOURCE_ENABLED
-
   etcpal_error_t result = kEtcPalErrOk;
 
   // Verify module initialized.
@@ -182,29 +180,30 @@ etcpal_error_t sacn_source_change_name(sacn_source_t handle, const char* new_nam
       result = kEtcPalErrInvalid;
   }
 
-  if (sacn_lock())
+  if (result == kEtcPalErrOk)
   {
-    // Look up the source's state.
-    SacnSource* source = NULL;
-    if (result == kEtcPalErrOk)
+    if (sacn_lock())
+    {
+      // Look up the source's state.
+      SacnSource* source = NULL;
       result = lookup_source(handle, &source);
 
-    if ((result == kEtcPalErrOk) && source && source->terminating)
-      result = kEtcPalErrNotFound;
+      if ((result == kEtcPalErrOk) && source && source->terminating)
+        result = kEtcPalErrNotFound;
 
-    // Set this source's name.
-    if (result == kEtcPalErrOk)
-      set_source_name(source, new_name);
+      // Set this source's name.
+      if (result == kEtcPalErrOk)
+        set_source_name(source, new_name);
 
-    sacn_unlock();
+      sacn_unlock();
+    }
+    else
+    {
+      result = kEtcPalErrSys;
+    }
   }
 
   return result;
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(new_name);
-  return kEtcPalErrNotImpl;
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
@@ -219,7 +218,6 @@ etcpal_error_t sacn_source_change_name(sacn_source_t handle, const char* new_nam
 void sacn_source_destroy(sacn_source_t handle)
 {
   // Validate and lock.
-#if SACN_SOURCE_ENABLED
   if (sacn_initialized() && (handle != SACN_SOURCE_INVALID) && sacn_lock())
   {
     // Try to find the source's state.
@@ -232,29 +230,25 @@ void sacn_source_destroy(sacn_source_t handle)
 
     sacn_unlock();
   }
-#else
-  ETCPAL_UNUSED_ARG(handle);
-#endif
 }
 
 /**
  * @brief Add a universe to an sACN source.
  *
  * Adds a universe to a source.
- * After this call completes, the applicaton must call a variant of sacn_source_update_values() to mark it ready for
+ * After this call completes, the applicaton must call a variant of sacn_source_update_levels() to mark it ready for
  * processing.
  *
  * If the source is not marked as unicast_only, the source will add the universe to its sACN Universe Discovery packets
- * once a variant of sacn_source_update_values() is called.
+ * once a variant of sacn_source_update_levels() is called.
  *
  * Note that a universe is considered as successfully added if it is able to successfully use any of the
  * network interfaces.  This will only return #kEtcPalErrNoNetints if none of the interfaces work.
  *
  * @param[in] handle Handle to the source to which to add a universe.
  * @param[in] config Configuration parameters for the universe to be added.
- * @param[in, out] netints Optional. If non-NULL, this is the list of interfaces the application wants to use, and
+ * @param[in, out] netint_config Optional. If non-NULL, this is the list of interfaces the application wants to use, and
  * the status codes are filled in.  If NULL, all available interfaces are tried.
- * @param[in, out] num_netints Optional. The size of netints, or 0 if netints is NULL.
  * @return #kEtcPalErrOk: Universe successfully added.
  * @return #kEtcPalErrNoNetints: None of the network interfaces provided were usable by the library.
  * @return #kEtcPalErrInvalid: Invalid parameter provided.
@@ -265,9 +259,8 @@ void sacn_source_destroy(sacn_source_t handle)
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
 etcpal_error_t sacn_source_add_universe(sacn_source_t handle, const SacnSourceUniverseConfig* config,
-                                        SacnMcastInterface* netints, size_t num_netints)
+                                        const SacnNetintConfig* netint_config)
 {
-#if SACN_SOURCE_ENABLED
   etcpal_error_t result = kEtcPalErrOk;
 
   // Verify module initialized.
@@ -293,36 +286,52 @@ etcpal_error_t sacn_source_add_universe(sacn_source_t handle, const SacnSourceUn
     }
   }
 
-  if (sacn_lock())
+  if (result == kEtcPalErrOk)
   {
-    // Look up the source's state.
-    SacnSource* source = NULL;
-    if (result == kEtcPalErrOk)
+    if (sacn_lock())
+    {
+      // Look up the source's state.
+      SacnSource* source = NULL;
       result = lookup_source(handle, &source);
 
-    if ((result == kEtcPalErrOk) && source && source->terminating)
-      result = kEtcPalErrNotFound;
+      if ((result == kEtcPalErrOk) && source->terminating)
+        result = kEtcPalErrNotFound;
 
-    // Initialize the universe's state.
-    SacnSourceUniverse* universe = NULL;
-    if (result == kEtcPalErrOk)
-      result = add_sacn_source_universe(source, config, netints, num_netints, &universe);
+      // Handle the existing universe if there is one.
+      if (result == kEtcPalErrOk)
+      {
+        bool found = false;
+        size_t index = get_source_universe_index(source, config->universe, &found);
 
-    // Update the source's netint tracking.
-    for (size_t i = 0; (result == kEtcPalErrOk) && (i < universe->netints.num_netints); ++i)
-      result = add_sacn_source_netint(source, &universe->netints.netints[i]);
+        if (found)
+        {
+          SacnSourceUniverse* existing_universe = &source->universes[index];
 
-    sacn_unlock();
+          if (existing_universe->termination_state == kTerminatingAndRemoving)
+            finish_source_universe_termination(source, index);  // Remove the old state before adding the new.
+          else
+            result = kEtcPalErrExists;
+        }
+      }
+
+      // Initialize the new universe's state.
+      SacnSourceUniverse* new_universe = NULL;
+      if (result == kEtcPalErrOk)
+        result = add_sacn_source_universe(source, config, netint_config, &new_universe);
+
+      // Update the source's netint tracking.
+      for (size_t i = 0; (result == kEtcPalErrOk) && (i < new_universe->netints.num_netints); ++i)
+        result = add_sacn_source_netint(source, &new_universe->netints.netints[i]);
+
+      sacn_unlock();
+    }
+    else
+    {
+      result = kEtcPalErrSys;
+    }
   }
 
   return result;
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(config);
-  ETCPAL_UNUSED_ARG(netints);
-  ETCPAL_UNUSED_ARG(num_netints);
-  return kEtcPalErrNotImpl;
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
@@ -339,7 +348,6 @@ etcpal_error_t sacn_source_add_universe(sacn_source_t handle, const SacnSourceUn
  */
 void sacn_source_remove_universe(sacn_source_t handle, uint16_t universe)
 {
-#if SACN_SOURCE_ENABLED
   if (sacn_lock())
   {
     SacnSource* source_state = NULL;
@@ -351,10 +359,6 @@ void sacn_source_remove_universe(sacn_source_t handle, uint16_t universe)
 
     sacn_unlock();
   }
-#else
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-#endif
 }
 
 /**
@@ -370,7 +374,6 @@ size_t sacn_source_get_universes(sacn_source_t handle, uint16_t* universes, size
 {
   size_t total_num_universes = 0;
 
-#if SACN_SOURCE_ENABLED
   if (sacn_lock())
   {
     // Look up source state
@@ -380,11 +383,6 @@ size_t sacn_source_get_universes(sacn_source_t handle, uint16_t* universes, size
 
     sacn_unlock();
   }
-#else
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universes);
-  ETCPAL_UNUSED_ARG(universes_size);
-#endif
 
   return total_num_universes;
 }
@@ -407,7 +405,6 @@ size_t sacn_source_get_universes(sacn_source_t handle, uint16_t* universes, size
  */
 etcpal_error_t sacn_source_add_unicast_destination(sacn_source_t handle, uint16_t universe, const EtcPalIpAddr* dest)
 {
-#if SACN_SOURCE_ENABLED
   etcpal_error_t result = kEtcPalErrOk;
 
   // Verify module initialized.
@@ -421,36 +418,53 @@ etcpal_error_t sacn_source_add_unicast_destination(sacn_source_t handle, uint16_
       result = kEtcPalErrInvalid;
   }
 
-  if (sacn_lock())
+  if (result == kEtcPalErrOk)
   {
-    // Look up the state
-    SacnSource* source_state = NULL;
-    SacnSourceUniverse* universe_state = NULL;
-    if (result == kEtcPalErrOk)
+    if (sacn_lock())
+    {
+      // Look up the state
+      SacnSource* source_state = NULL;
+      SacnSourceUniverse* universe_state = NULL;
       result = lookup_source_and_universe(handle, universe, &source_state, &universe_state);
 
-    if ((result == kEtcPalErrOk) && universe_state && (universe_state->termination_state == kTerminatingAndRemoving))
-      result = kEtcPalErrNotFound;
+      if ((result == kEtcPalErrOk) && (universe_state->termination_state == kTerminatingAndRemoving))
+        result = kEtcPalErrNotFound;
 
-    // Add unicast destination
-    SacnUnicastDestination* unicast_dest = NULL;
-    if (result == kEtcPalErrOk)
-      result = add_sacn_unicast_dest(universe_state, dest, &unicast_dest);
+      // Handle the existing unicast destination if there is one.
+      if (result == kEtcPalErrOk)
+      {
+        bool found = false;
+        size_t index = get_unicast_dest_index(universe_state, dest, &found);
 
-    // Initialize & reset transmission suppression
-    if (result == kEtcPalErrOk)
-      reset_transmission_suppression(source_state, universe_state, kResetLevelAndPap);
+        if (found)
+        {
+          SacnUnicastDestination* existing_unicast_dest = &universe_state->unicast_dests[index];
 
-    sacn_unlock();
+          if (existing_unicast_dest->termination_state == kTerminatingAndRemoving)
+            finish_unicast_dest_termination(universe_state, index);  // Remove the old state before adding the new.
+          else
+            result = kEtcPalErrExists;
+        }
+      }
+
+      // Add unicast destination
+      SacnUnicastDestination* new_unicast_dest = NULL;
+      if (result == kEtcPalErrOk)
+        result = add_sacn_unicast_dest(universe_state, dest, &new_unicast_dest);
+
+      // Initialize & reset transmission suppression
+      if (result == kEtcPalErrOk)
+        reset_transmission_suppression(source_state, universe_state, kResetLevelAndPap);
+
+      sacn_unlock();
+    }
+    else
+    {
+      result = kEtcPalErrSys;
+    }
   }
 
   return result;
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(dest);
-  return kEtcPalErrNotImpl;
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
@@ -466,7 +480,6 @@ etcpal_error_t sacn_source_add_unicast_destination(sacn_source_t handle, uint16_
  */
 void sacn_source_remove_unicast_destination(sacn_source_t handle, uint16_t universe, const EtcPalIpAddr* dest)
 {
-#if SACN_SOURCE_ENABLED
   // Validate & lock
   if (dest && sacn_lock())
   {
@@ -487,11 +500,6 @@ void sacn_source_remove_unicast_destination(sacn_source_t handle, uint16_t unive
 
     sacn_unlock();
   }
-#else
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(dest);
-#endif
 }
 
 /**
@@ -510,7 +518,6 @@ size_t sacn_source_get_unicast_destinations(sacn_source_t handle, uint16_t unive
 {
   size_t total_num_dests = 0;
 
-#if SACN_SOURCE_ENABLED
   if (sacn_lock())
   {
     // Look up universe state
@@ -524,12 +531,6 @@ size_t sacn_source_get_unicast_destinations(sacn_source_t handle, uint16_t unive
 
     sacn_unlock();
   }
-#else
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(destinations);
-  ETCPAL_UNUSED_ARG(destinations_size);
-#endif
 
   return total_num_dests;
 }
@@ -552,7 +553,6 @@ size_t sacn_source_get_unicast_destinations(sacn_source_t handle, uint16_t unive
  */
 etcpal_error_t sacn_source_change_priority(sacn_source_t handle, uint16_t universe, uint8_t new_priority)
 {
-#if SACN_SOURCE_ENABLED
   etcpal_error_t result = kEtcPalErrOk;
 
   // Verify module initialized.
@@ -566,31 +566,31 @@ etcpal_error_t sacn_source_change_priority(sacn_source_t handle, uint16_t univer
       result = kEtcPalErrInvalid;
   }
 
-  if (sacn_lock())
+  if (result == kEtcPalErrOk)
   {
-    // Look up the source and universe state.
-    SacnSource* source_state = NULL;
-    SacnSourceUniverse* universe_state = NULL;
-    if (result == kEtcPalErrOk)
+    if (sacn_lock())
+    {
+      // Look up the source and universe state.
+      SacnSource* source_state = NULL;
+      SacnSourceUniverse* universe_state = NULL;
       result = lookup_source_and_universe(handle, universe, &source_state, &universe_state);
 
-    if ((result == kEtcPalErrOk) && universe_state && (universe_state->termination_state == kTerminatingAndRemoving))
-      result = kEtcPalErrNotFound;
+      if ((result == kEtcPalErrOk) && universe_state && (universe_state->termination_state == kTerminatingAndRemoving))
+        result = kEtcPalErrNotFound;
 
-    // Set the priority.
-    if (result == kEtcPalErrOk)
-      set_universe_priority(source_state, universe_state, new_priority);
+      // Set the priority.
+      if (result == kEtcPalErrOk)
+        set_universe_priority(source_state, universe_state, new_priority);
 
-    sacn_unlock();
+      sacn_unlock();
+    }
+    else
+    {
+      result = kEtcPalErrSys;
+    }
   }
 
   return result;
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(new_priority);
-  return kEtcPalErrNotImpl;
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
@@ -614,7 +614,6 @@ etcpal_error_t sacn_source_change_priority(sacn_source_t handle, uint16_t univer
  */
 etcpal_error_t sacn_source_change_preview_flag(sacn_source_t handle, uint16_t universe, bool new_preview_flag)
 {
-#if SACN_SOURCE_ENABLED
   etcpal_error_t result = kEtcPalErrOk;
 
   // Verify module initialized.
@@ -628,31 +627,31 @@ etcpal_error_t sacn_source_change_preview_flag(sacn_source_t handle, uint16_t un
       result = kEtcPalErrInvalid;
   }
 
-  if (sacn_lock())
+  if (result == kEtcPalErrOk)
   {
-    // Look up the source and universe state.
-    SacnSource* source_state = NULL;
-    SacnSourceUniverse* universe_state = NULL;
-    if (result == kEtcPalErrOk)
+    if (sacn_lock())
+    {
+      // Look up the source and universe state.
+      SacnSource* source_state = NULL;
+      SacnSourceUniverse* universe_state = NULL;
       result = lookup_source_and_universe(handle, universe, &source_state, &universe_state);
 
-    if ((result == kEtcPalErrOk) && universe_state && (universe_state->termination_state == kTerminatingAndRemoving))
-      result = kEtcPalErrNotFound;
+      if ((result == kEtcPalErrOk) && universe_state && (universe_state->termination_state == kTerminatingAndRemoving))
+        result = kEtcPalErrNotFound;
 
-    // Set the preview flag.
-    if (result == kEtcPalErrOk)
-      set_preview_flag(source_state, universe_state, new_preview_flag);
+      // Set the preview flag.
+      if (result == kEtcPalErrOk)
+        set_preview_flag(source_state, universe_state, new_preview_flag);
 
-    sacn_unlock();
+      sacn_unlock();
+    }
+    else
+    {
+      result = kEtcPalErrSys;
+    }
   }
 
   return result;
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(new_preview_flag);
-  return kEtcPalErrNotImpl;
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
@@ -664,7 +663,7 @@ etcpal_error_t sacn_source_change_preview_flag(sacn_source_t handle, uint16_t un
  * This function will update the packet buffers with the new sync universe. If this universe is transmitting NULL start
  * code or PAP data, the logic that slows down packet transmission due to inactivity will be reset.
  *
- * TODO: At this time, synchronization is not supported by this library.
+ * @todo At this time, synchronization is not supported by this library.
  *
  * @param[in] handle Handle to the source to change.
  * @param[in] universe The universe to change.
@@ -678,19 +677,12 @@ etcpal_error_t sacn_source_change_preview_flag(sacn_source_t handle, uint16_t un
 etcpal_error_t sacn_source_change_synchronization_universe(sacn_source_t handle, uint16_t universe,
                                                            uint16_t new_sync_universe)
 {
-#if SACN_SOURCE_ENABLED
   // TODO
 
   ETCPAL_UNUSED_ARG(handle);
   ETCPAL_UNUSED_ARG(universe);
   ETCPAL_UNUSED_ARG(new_sync_universe);
   return kEtcPalErrNotImpl;
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(new_sync_universe);
-  return kEtcPalErrNotImpl;
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
@@ -715,7 +707,6 @@ etcpal_error_t sacn_source_change_synchronization_universe(sacn_source_t handle,
 etcpal_error_t sacn_source_send_now(sacn_source_t handle, uint16_t universe, uint8_t start_code, const uint8_t* buffer,
                                     size_t buflen)
 {
-#if SACN_SOURCE_ENABLED
   etcpal_error_t result = kEtcPalErrOk;
 
   // Verify module initialized.
@@ -732,43 +723,42 @@ etcpal_error_t sacn_source_send_now(sacn_source_t handle, uint16_t universe, uin
     }
   }
 
-  if (sacn_lock())
+  if (result == kEtcPalErrOk)
   {
-    // Look up state
-    SacnSource* source_state = NULL;
-    SacnSourceUniverse* universe_state = NULL;
-    if (result == kEtcPalErrOk)
+    if (sacn_lock())
+    {
+      // Look up state
+      SacnSource* source_state = NULL;
+      SacnSourceUniverse* universe_state = NULL;
       result = lookup_source_and_universe(handle, universe, &source_state, &universe_state);
 
-    if ((result == kEtcPalErrOk) && universe_state && (universe_state->termination_state == kTerminatingAndRemoving))
-      result = kEtcPalErrNotFound;
+      if ((result == kEtcPalErrOk) && universe_state && (universe_state->termination_state == kTerminatingAndRemoving))
+        result = kEtcPalErrNotFound;
 
-    if (result == kEtcPalErrOk)
-    {
-      // Initialize send buffer
-      uint8_t send_buf[SACN_MTU];
-      init_sacn_data_send_buf(send_buf, start_code, &source_state->cid, source_state->name, universe_state->priority,
-                              universe_state->universe_id, universe_state->sync_universe, universe_state->send_preview);
-      update_send_buf_data(send_buf, buffer, (uint16_t)buflen, kDisableForceSync);
+      if (result == kEtcPalErrOk)
+      {
+        // Initialize send buffer
+        uint8_t send_buf[SACN_DATA_PACKET_MTU];
+        init_sacn_data_send_buf(send_buf, start_code, &source_state->cid, source_state->name, universe_state->priority,
+                                universe_state->universe_id, universe_state->sync_universe,
+                                universe_state->send_preview);
+        update_send_buf_data(send_buf, buffer, (uint16_t)buflen, kDisableForceSync);
 
-      // Send on the network
-      send_universe_multicast(source_state, universe_state, send_buf);
-      send_universe_unicast(source_state, universe_state, send_buf);
-      increment_sequence_number(universe_state);
+        // Send on the network
+        send_universe_multicast(source_state, universe_state, send_buf);
+        send_universe_unicast(source_state, universe_state, send_buf);
+        increment_sequence_number(universe_state);
+      }
+
+      sacn_unlock();
     }
-
-    sacn_unlock();
+    else
+    {
+      result = kEtcPalErrSys;
+    }
   }
 
   return result;
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(start_code);
-  ETCPAL_UNUSED_ARG(buffer);
-  ETCPAL_UNUSED_ARG(buflen);
-  return kEtcPalErrNotImpl;
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
@@ -776,7 +766,7 @@ etcpal_error_t sacn_source_send_now(sacn_source_t handle, uint16_t universe, uin
  *
  * This will cause the source to transmit a synchronization packet on the given synchronization universe.
  *
- * TODO: At this time, synchronization is not supported by this library, so this function is not implemented.
+ * @todo At this time, synchronization is not supported by this library, so this function is not implemented.
  *
  * @param[in] handle Handle to the source.
  * @param[in] sync_universe The synchronization universe to send on.
@@ -789,39 +779,32 @@ etcpal_error_t sacn_source_send_now(sacn_source_t handle, uint16_t universe, uin
  */
 etcpal_error_t sacn_source_send_synchronization(sacn_source_t handle, uint16_t sync_universe)
 {
-#if SACN_SOURCE_ENABLED
   // TODO
 
   ETCPAL_UNUSED_ARG(handle);
   ETCPAL_UNUSED_ARG(sync_universe);
   return kEtcPalErrNotImpl;
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(sync_universe);
-  return kEtcPalErrNotImpl;
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
- * @brief Copies the universe's dmx values into the packet to be sent on the next threaded or manual update.
+ * @brief Copies the universe's DMX levels into the packet to be sent on the next threaded or manual update.
  *
- * This function will update the outgoing packet values, and reset the logic that slows down packet transmission due to
+ * This function will update the outgoing packet data, and reset the logic that slows down packet transmission due to
  * inactivity.
  *
  * When you don't have per-address priority changes to make, use this function. Otherwise, use
- * sacn_source_update_values_and_pap().
+ * sacn_source_update_levels_and_pap().
  *
  * @param[in] handle Handle to the source to update.
  * @param[in] universe Universe to update.
- * @param[in] new_values A buffer of DMX values to copy from. If this pointer is NULL, the source will terminate DMX
+ * @param[in] new_levels A buffer of DMX levels to copy from. If this pointer is NULL, the source will terminate DMX
  * transmission without removing the universe.
- * @param[in] new_values_size Size of new_values. This must be no larger than #DMX_ADDRESS_COUNT.
+ * @param[in] new_levels_size Size of new_levels. This must be no larger than #DMX_ADDRESS_COUNT.
  */
-void sacn_source_update_values(sacn_source_t handle, uint16_t universe, const uint8_t* new_values,
-                               size_t new_values_size)
+void sacn_source_update_levels(sacn_source_t handle, uint16_t universe, const uint8_t* new_levels,
+                               size_t new_levels_size)
 {
-#if SACN_SOURCE_ENABLED
-  if ((new_values_size <= DMX_ADDRESS_COUNT) && sacn_lock())
+  if ((new_levels_size <= DMX_ADDRESS_COUNT) && sacn_lock())
   {
     SacnSource* source_state = NULL;
     SacnSourceUniverse* universe_state = NULL;
@@ -829,56 +812,48 @@ void sacn_source_update_values(sacn_source_t handle, uint16_t universe, const ui
 
     if (universe_state && (universe_state->termination_state != kTerminatingAndRemoving))
     {
-      if (!new_values)
+      if (!new_levels)
       {
         set_universe_terminating(universe_state, kTerminateWithoutRemoving);
         disable_pap_data(universe_state);
       }
 
       // Do this last.
-      update_levels_and_or_paps(source_state, universe_state, new_values, new_values_size, NULL, 0, kDisableForceSync);
+      update_levels_and_or_pap(source_state, universe_state, new_levels, new_levels_size, NULL, 0, kDisableForceSync);
     }
 
     sacn_unlock();
   }
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(new_values);
-  ETCPAL_UNUSED_ARG(new_values_size);
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
- * @brief Copies the universe's dmx values and per-address priorities into packets that are sent on the next threaded or
+ * @brief Copies the universe's DMX levels and per-address priorities into packets that are sent on the next threaded or
  * manual update.
  *
- * This function will update the outgoing packet values for both DMX and per-address priority data, and reset the logic
+ * This function will update the outgoing packet data for both DMX and per-address priority data, and reset the logic
  * that slows down packet transmission due to inactivity.
  *
- * The application should adhere to the rules for per-address priority (PAP) specified in
- * https://etclabs.github.io/sACN/docs/head/per_address_priority.html. This API will adhere to the rules within the
- * scope of the implementation. This includes handling transmission suppression and the order in which DMX and PAP
- * packets are sent. This also includes automatically setting levels to 0, even if the application specified a different
- * level, for each slot that the application assigns a PAP of 0 (by setting the PAP to 0 or reducing the number of
- * PAPs).
+ * The application should adhere to the rules for per-address priority (PAP) specified in @ref per_address_priority.
+ * This API will adhere to the rules within the scope of the implementation. This includes handling transmission
+ * suppression and the order in which DMX and PAP packets are sent. This also includes automatically setting levels to
+ * 0, even if the application specified a different level, for each slot that the application assigns a PAP of 0 (by
+ * setting the PAP to 0 or reducing the PAP count).
  *
  * @param[in] handle Handle to the source to update.
  * @param[in] universe Universe to update.
- * @param[in] new_values A buffer of DMX values to copy from. If this pointer is NULL, the source will terminate DMX
+ * @param[in] new_levels A buffer of DMX levels to copy from. If this pointer is NULL, the source will terminate DMX
  * transmission without removing the universe.
- * @param[in] new_values_size Size of new_values. This must be no larger than #DMX_ADDRESS_COUNT.
+ * @param[in] new_levels_size Size of new_levels. This must be no larger than #DMX_ADDRESS_COUNT.
  * @param[in] new_priorities A buffer of per-address priorities to copy from. This will only be sent when DMX is also
  * being sent. Setting this to NULL will stop the transmission of per-address priorities, in which case receivers will
  * revert to the universe priority after PAP times out.
  * @param[in] new_priorities_size Size of new_priorities. This must be no larger than #DMX_ADDRESS_COUNT.
  */
-void sacn_source_update_values_and_pap(sacn_source_t handle, uint16_t universe, const uint8_t* new_values,
-                                       size_t new_values_size, const uint8_t* new_priorities,
+void sacn_source_update_levels_and_pap(sacn_source_t handle, uint16_t universe, const uint8_t* new_levels,
+                                       size_t new_levels_size, const uint8_t* new_priorities,
                                        size_t new_priorities_size)
 {
-#if SACN_SOURCE_ENABLED
-  if ((new_values_size <= DMX_ADDRESS_COUNT) && (new_priorities_size <= DMX_ADDRESS_COUNT) && sacn_lock())
+  if ((new_levels_size <= DMX_ADDRESS_COUNT) && (new_priorities_size <= DMX_ADDRESS_COUNT) && sacn_lock())
   {
     SacnSource* source_state = NULL;
     SacnSourceUniverse* universe_state = NULL;
@@ -886,50 +861,41 @@ void sacn_source_update_values_and_pap(sacn_source_t handle, uint16_t universe, 
 
     if (universe_state && (universe_state->termination_state != kTerminatingAndRemoving))
     {
-      if (!new_values)
+      if (!new_levels)
         set_universe_terminating(universe_state, kTerminateWithoutRemoving);
-      if (!new_values || !new_priorities)
+      if (!new_levels || !new_priorities)
         disable_pap_data(universe_state);
 
       // Do this last.
-      update_levels_and_or_paps(source_state, universe_state, new_values, new_values_size,
-                                new_values ? new_priorities : NULL, new_priorities_size, kDisableForceSync);
+      update_levels_and_or_pap(source_state, universe_state, new_levels, new_levels_size,
+                               new_levels ? new_priorities : NULL, new_priorities_size, kDisableForceSync);
     }
 
     sacn_unlock();
   }
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(new_values);
-  ETCPAL_UNUSED_ARG(new_values_size);
-  ETCPAL_UNUSED_ARG(new_priorities);
-  ETCPAL_UNUSED_ARG(new_priorities_size);
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
- * @brief Like sacn_source_update_values(), but also sets the force_sync flag on the packet.
+ * @brief Like sacn_source_update_levels(), but also sets the force_sync flag on the packet.
  *
- * This function will update the outgoing packet values to be sent on the next threaded or manual update, and will reset
+ * This function will update the outgoing packet data to be sent on the next threaded or manual update, and will reset
  * the logic that slows down packet transmission due to inactivity. Additionally, the packet to be sent will have its
  * force_synchronization option flag set.
  *
- * If no synchronization universe is configured, this function acts like a direct call to sacn_source_update_values().
+ * If no synchronization universe is configured, this function acts like a direct call to sacn_source_update_levels().
  *
- * TODO: At this time, synchronization is not supported by this library.
+ * @todo At this time, synchronization is not supported by this library.
  *
  * @param[in] handle Handle to the source to update.
  * @param[in] universe Universe to update.
- * @param[in] new_values A buffer of DMX values to copy from. If this pointer is NULL, the source will terminate DMX
+ * @param[in] new_levels A buffer of DMX levels to copy from. If this pointer is NULL, the source will terminate DMX
  * transmission without removing the universe.
- * @param[in] new_values_size Size of new_values. This must be no larger than #DMX_ADDRESS_COUNT.
+ * @param[in] new_levels_size Size of new_levels. This must be no larger than #DMX_ADDRESS_COUNT.
  */
-void sacn_source_update_values_and_force_sync(sacn_source_t handle, uint16_t universe, const uint8_t* new_values,
-                                              size_t new_values_size)
+void sacn_source_update_levels_and_force_sync(sacn_source_t handle, uint16_t universe, const uint8_t* new_levels,
+                                              size_t new_levels_size)
 {
-#if SACN_SOURCE_ENABLED
-  if ((new_values_size <= DMX_ADDRESS_COUNT) && sacn_lock())
+  if ((new_levels_size <= DMX_ADDRESS_COUNT) && sacn_lock())
   {
     SacnSource* source_state = NULL;
     SacnSourceUniverse* universe_state = NULL;
@@ -937,61 +903,53 @@ void sacn_source_update_values_and_force_sync(sacn_source_t handle, uint16_t uni
 
     if (universe_state && (universe_state->termination_state != kTerminatingAndRemoving))
     {
-      if (!new_values)
+      if (!new_levels)
       {
         set_universe_terminating(universe_state, kTerminateWithoutRemoving);
         disable_pap_data(universe_state);
       }
 
       // Do this last.
-      update_levels_and_or_paps(source_state, universe_state, new_values, new_values_size, NULL, 0, kEnableForceSync);
+      update_levels_and_or_pap(source_state, universe_state, new_levels, new_levels_size, NULL, 0, kEnableForceSync);
     }
 
     sacn_unlock();
   }
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(new_values);
-  ETCPAL_UNUSED_ARG(new_values_size);
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
- * @brief Like sacn_source_update_values_and_pap(), but also sets the force_sync flag on the packet.
+ * @brief Like sacn_source_update_levels_and_pap(), but also sets the force_sync flag on the packet.
  *
- * This function will update the outgoing packet values to be sent on the next threaded or manual update, and will reset
+ * This function will update the outgoing packet data to be sent on the next threaded or manual update, and will reset
  * the logic that slows down packet transmission due to inactivity. Additionally, both packets to be sent by this call
  * will have their force_synchronization option flags set.
  *
- * The application should adhere to the rules for per-address priority (PAP) specified in
- * https://etclabs.github.io/sACN/docs/head/per_address_priority.html. This API will adhere to the rules within the
- * scope of the implementation. This includes handling transmission suppression and the order in which DMX and PAP
- * packets are sent. This also includes automatically setting levels to 0, even if the application specified a different
- * level, for each slot that the application assigns a PAP of 0 (by setting the PAP to 0 or reducing the number of
- * PAPs).
+ * The application should adhere to the rules for per-address priority (PAP) specified in @ref per_address_priority.
+ * This API will adhere to the rules within the scope of the implementation. This includes handling transmission
+ * suppression and the order in which DMX and PAP packets are sent. This also includes automatically setting levels to
+ * 0, even if the application specified a different level, for each slot that the application assigns a PAP of 0 (by
+ * setting the PAP to 0 or reducing the PAP count).
  *
  * If no synchronization universe is configured, this function acts like a direct call to
- * sacn_source_update_values_and_pap().
+ * sacn_source_update_levels_and_pap().
  *
- * TODO: At this time, synchronization is not supported by this library.
+ * @todo At this time, synchronization is not supported by this library.
  *
  * @param[in] handle Handle to the source to update.
  * @param[in] universe Universe to update.
- * @param[in] new_values A buffer of DMX values to copy from. If this pointer is NULL, the source will terminate DMX
+ * @param[in] new_levels A buffer of DMX levels to copy from. If this pointer is NULL, the source will terminate DMX
  * transmission without removing the universe.
- * @param[in] new_values_size Size of new_values. This must be no larger than #DMX_ADDRESS_COUNT.
+ * @param[in] new_levels_size Size of new_levels. This must be no larger than #DMX_ADDRESS_COUNT.
  * @param[in] new_priorities A buffer of per-address priorities to copy from. This will only be sent when DMX is also
  * being sent. Setting this to NULL will stop the transmission of per-address priorities, in which case receivers will
  * revert to the universe priority after PAP times out.
  * @param[in] new_priorities_size Size of new_priorities. This must be no larger than #DMX_ADDRESS_COUNT.
  */
-void sacn_source_update_values_and_pap_and_force_sync(sacn_source_t handle, uint16_t universe,
-                                                      const uint8_t* new_values, size_t new_values_size,
+void sacn_source_update_levels_and_pap_and_force_sync(sacn_source_t handle, uint16_t universe,
+                                                      const uint8_t* new_levels, size_t new_levels_size,
                                                       const uint8_t* new_priorities, size_t new_priorities_size)
 {
-#if SACN_SOURCE_ENABLED
-  if ((new_values_size <= DMX_ADDRESS_COUNT) && (new_priorities_size <= DMX_ADDRESS_COUNT) && sacn_lock())
+  if ((new_levels_size <= DMX_ADDRESS_COUNT) && (new_priorities_size <= DMX_ADDRESS_COUNT) && sacn_lock())
   {
     SacnSource* source_state = NULL;
     SacnSourceUniverse* universe_state = NULL;
@@ -999,26 +957,18 @@ void sacn_source_update_values_and_pap_and_force_sync(sacn_source_t handle, uint
 
     if (universe_state && (universe_state->termination_state != kTerminatingAndRemoving))
     {
-      if (!new_values)
+      if (!new_levels)
         set_universe_terminating(universe_state, kTerminateWithoutRemoving);
-      if (!new_values || !new_priorities)
+      if (!new_levels || !new_priorities)
         disable_pap_data(universe_state);
 
       // Do this last.
-      update_levels_and_or_paps(source_state, universe_state, new_values, new_values_size,
-                                new_values ? new_priorities : NULL, new_priorities_size, kEnableForceSync);
+      update_levels_and_or_pap(source_state, universe_state, new_levels, new_levels_size,
+                               new_levels ? new_priorities : NULL, new_priorities_size, kEnableForceSync);
     }
 
     sacn_unlock();
   }
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(new_values);
-  ETCPAL_UNUSED_ARG(new_values_size);
-  ETCPAL_UNUSED_ARG(new_priorities);
-  ETCPAL_UNUSED_ARG(new_priorities_size);
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
@@ -1039,21 +989,19 @@ void sacn_source_update_values_and_pap_and_force_sync(sacn_source_t handle, uint
  */
 int sacn_source_process_manual(void)
 {
-#if SACN_SOURCE_ENABLED
   return take_lock_and_process_sources(kProcessManualSources);
-#else
-  return 0;
-#endif
 }
 
 /**
  * @brief Resets the underlying network sockets for all universes of all sources.
  *
- * This is typically used when the application detects that the list of networking interfaces has changed, and wants
- * every universe to use the same network interfaces.
+ * This is typically used when the application detects that the list of networking interfaces has changed. This changes
+ * the list of system interfaces the source API will be limited to (the list passed into sacn_init(), if any, is
+ * overridden for the source API, but not the other APIs). Then all universes of all sources will be configured to use
+ * all of those interfaces.
  *
- * After this call completes successfully, all universes of all sources are considered to be updated and have new values
- * and priorities. It's as if every source just started sending values on all their universes.
+ * After this call completes successfully, all universes of all sources are considered to be updated and have new levels
+ * and priorities. It's as if every source just started sending levels on all their universes.
  *
  * If this call fails, the caller must call sacn_source_destroy() on all sources, because the source API may be in an
  * invalid state.
@@ -1061,54 +1009,57 @@ int sacn_source_process_manual(void)
  * Note that the networking reset is considered successful if it is able to successfully use any of the
  * network interfaces passed in.  This will only return #kEtcPalErrNoNetints if none of the interfaces work.
  *
- * @param[in, out] netints If non-NULL, this is the list of interfaces the application wants to use, and the status
- * codes are filled in.  If NULL, all available interfaces are tried.
- * @param[in] num_netints The size of netints, or 0 if netints is NULL.
+ * @param[in, out] sys_netint_config Optional. If non-NULL, this is the list of system interfaces the source API will be
+ * limited to, and the status codes are filled in.  If NULL, the source API is allowed to use all available system
+ * interfaces.
  * @return #kEtcPalErrOk: Networking reset successfully.
  * @return #kEtcPalErrNoNetints: None of the network interfaces provided were usable by the library.
  * @return #kEtcPalErrNotInit: Module not initialized.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
-etcpal_error_t sacn_source_reset_networking(SacnMcastInterface* netints, size_t num_netints)
+etcpal_error_t sacn_source_reset_networking(const SacnNetintConfig* sys_netint_config)
 {
-#if SACN_SOURCE_ENABLED
   etcpal_error_t result = kEtcPalErrOk;
 
   if (!sacn_initialized())
     result = kEtcPalErrNotInit;
 
-  if ((result == kEtcPalErrOk) && sacn_lock())
+  if (result == kEtcPalErrOk)
   {
-    sacn_sockets_reset_source();
-
-    for (size_t i = 0; (result == kEtcPalErrOk) && (i < get_num_sources()); ++i)
+    if (sacn_lock())
     {
-      SacnSource* source = get_source(i);
-      clear_source_netints(source);
+      sacn_sockets_reset_source(sys_netint_config);
 
-      for (size_t j = 0; (result == kEtcPalErrOk) && (j < source->num_universes); ++j)
-        result = reset_source_universe_networking(source, &source->universes[j], netints, num_netints);
+      for (size_t i = 0; (result == kEtcPalErrOk) && (i < get_num_sources()); ++i)
+      {
+        SacnSource* source = get_source(i);
+        clear_source_netints(source);
+
+        for (size_t j = 0; (result == kEtcPalErrOk) && (j < source->num_universes); ++j)
+          result = reset_source_universe_networking(source, &source->universes[j], NULL);
+      }
+
+      sacn_unlock();
     }
-
-    sacn_unlock();
+    else
+    {
+      result = kEtcPalErrSys;
+    }
   }
 
   return result;
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(netints);
-  ETCPAL_UNUSED_ARG(num_netints);
-  return kEtcPalErrNotImpl;
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
  * @brief Resets the underlying network sockets and determines network interfaces for each universe of each source.
  *
- * This is typically used when the application detects that the list of networking interfaces has changed, and wants to
- * determine what the new network interfaces should be for each universe of each source.
+ * This is typically used when the application detects that the list of networking interfaces has changed. This changes
+ * the list of system interfaces the source API will be limited to (the list passed into sacn_init(), if any, is
+ * overridden for the source API, but not the other APIs). Then the network interfaces are specified for each universe
+ * of each source.
  *
- * After this call completes successfully, all universes of all sources are considered to be updated and have new values
- * and priorities. It's as if every source just started sending values on all their universes.
+ * After this call completes successfully, all universes of all sources are considered to be updated and have new levels
+ * and priorities. It's as if every source just started sending levels on all their universes.
  *
  * If this call fails, the caller must call sacn_source_destroy() on all sources, because the source API may be in an
  * invalid state.
@@ -1117,84 +1068,99 @@ etcpal_error_t sacn_source_reset_networking(SacnMcastInterface* netints, size_t 
  * network interfaces passed in for each universe.  This will only return #kEtcPalErrNoNetints if none of the interfaces
  * work for a universe.
  *
- * @param[in, out] netint_lists Lists of interfaces the application wants to use for each universe. Must not be NULL.
- * Must include all universes of all sources, and nothing more. The status codes are filled in whenever
+ * @param[in, out] sys_netint_config Optional. If non-NULL, this is the list of system interfaces the source API will be
+ * limited to, and the status codes are filled in.  If NULL, the source API is allowed to use all available system
+ * interfaces.
+ * @param[in, out] per_universe_netint_lists Lists of interfaces the application wants to use for each universe. Must
+ * not be NULL. Must include all universes of all sources, and nothing more. The status codes are filled in whenever
  * SacnSourceUniverseNetintList::netints is non-NULL.
- * @param[in] num_netint_lists The size of netint_lists. Must not be 0.
+ * @param[in] num_per_universe_netint_lists The size of netint_lists. Must not be 0.
  * @return #kEtcPalErrOk: Networking reset successfully.
  * @return #kEtcPalErrNoNetints: None of the network interfaces provided for a universe were usable by the library.
  * @return #kEtcPalErrInvalid: Invalid parameter provided.
  * @return #kEtcPalErrNotInit: Module not initialized.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
-etcpal_error_t sacn_source_reset_networking_per_universe(const SacnSourceUniverseNetintList* netint_lists,
-                                                         size_t num_netint_lists)
+etcpal_error_t sacn_source_reset_networking_per_universe(const SacnNetintConfig* sys_netint_config,
+                                                         const SacnSourceUniverseNetintList* per_universe_netint_lists,
+                                                         size_t num_per_universe_netint_lists)
 {
-#if SACN_SOURCE_ENABLED
   etcpal_error_t result = kEtcPalErrOk;
 
   if (!sacn_initialized())
     result = kEtcPalErrNotInit;
 
-  if ((netint_lists == NULL) || (num_netint_lists == 0))
+  if ((per_universe_netint_lists == NULL) || (num_per_universe_netint_lists == 0))
     result = kEtcPalErrInvalid;
 
-  if (sacn_lock())
+  if (result == kEtcPalErrOk)
   {
-    // Validate netint_lists. It must include all universes of all sources and nothing more.
-    size_t total_num_universes = 0;
-    for (size_t i = 0; (result == kEtcPalErrOk) && (i < get_num_sources()); ++i)
+    if (sacn_lock())
     {
-      for (size_t j = 0; (result == kEtcPalErrOk) && (j < get_source(i)->num_universes); ++j)
+      // Validate netint_lists. It must include all universes of all sources and nothing more.
+      size_t total_num_universes = 0;
+      for (size_t i = 0; (result == kEtcPalErrOk) && (i < get_num_sources()); ++i)
       {
-        ++total_num_universes;
-
-        bool found = false;
-        for (size_t k = 0; !found && (k < num_netint_lists); ++k)
+        for (size_t j = 0; (result == kEtcPalErrOk) && (j < get_source(i)->num_universes); ++j)
         {
-          found = ((get_source(i)->handle == netint_lists[k].handle) &&
-                   (get_source(i)->universes[j].universe_id == netint_lists[k].universe));
+          // Universes being removed should not be factored into this.
+          if (get_source(i)->universes[j].termination_state != kTerminatingAndRemoving)
+          {
+            ++total_num_universes;
+
+            bool found = false;
+            get_per_universe_netint_lists_index(get_source(i)->handle, get_source(i)->universes[j].universe_id,
+                                                per_universe_netint_lists, num_per_universe_netint_lists, &found);
+
+            if (!found)
+              result = kEtcPalErrInvalid;
+          }
         }
-
-        if (!found)
-          result = kEtcPalErrInvalid;
       }
-    }
 
-    if (result == kEtcPalErrOk)
-    {
-      if (num_netint_lists != total_num_universes)
+      if ((result == kEtcPalErrOk) && (num_per_universe_netint_lists != total_num_universes))
         result = kEtcPalErrInvalid;
-    }
 
-    if (result == kEtcPalErrOk)
-    {
-      sacn_sockets_reset_source();
+      if (result == kEtcPalErrOk)
+        sacn_sockets_reset_source(sys_netint_config);
 
-      for (size_t i = 0; i < get_num_sources(); ++i)
+      for (size_t i = 0; (result == kEtcPalErrOk) && (i < get_num_sources()); ++i)
+      {
         clear_source_netints(get_source(i));
-    }
 
-    for (size_t i = 0; (result == kEtcPalErrOk) && (i < num_netint_lists); ++i)
+        for (size_t j = 0; (result == kEtcPalErrOk) && (j < get_source(i)->num_universes); ++j)
+        {
+          if (get_source(i)->universes[j].termination_state == kTerminatingAndRemoving)
+          {
+            // Keep the universe netints as they are, but add them to source netints again since it was cleared.
+            for (size_t k = 0; (result == kEtcPalErrOk) && (k < get_source(i)->universes[j].netints.num_netints); ++k)
+              result = add_sacn_source_netint(get_source(i), &get_source(i)->universes[j].netints.netints[k]);
+          }
+          else
+          {
+            // Replace the universe netints, then add the new ones to the source netints.
+            size_t list_index =
+                get_per_universe_netint_lists_index(get_source(i)->handle, get_source(i)->universes[j].universe_id,
+                                                    per_universe_netint_lists, num_per_universe_netint_lists, NULL);
+
+            SacnNetintConfig universe_netint_config;
+            universe_netint_config.netints = per_universe_netint_lists[list_index].netints;
+            universe_netint_config.num_netints = per_universe_netint_lists[list_index].num_netints;
+            result =
+                reset_source_universe_networking(get_source(i), &get_source(i)->universes[j], &universe_netint_config);
+          }
+        }
+      }
+
+      sacn_unlock();
+    }
+    else
     {
-      const SacnSourceUniverseNetintList* netint_list = &netint_lists[i];
-
-      SacnSource* source;
-      SacnSourceUniverse* universe;
-      lookup_source_and_universe(netint_list->handle, netint_list->universe, &source, &universe);
-
-      result = reset_source_universe_networking(source, universe, netint_list->netints, netint_list->num_netints);
+      result = kEtcPalErrSys;
     }
-
-    sacn_unlock();
   }
 
   return result;
-#else   // SACN_SOURCE_ENABLED
-  ETCPAL_UNUSED_ARG(netint_lists);
-  ETCPAL_UNUSED_ARG(num_netint_lists);
-  return kEtcPalErrNotImpl;
-#endif  // SACN_SOURCE_ENABLED
 }
 
 /**
@@ -1212,7 +1178,6 @@ size_t sacn_source_get_network_interfaces(sacn_source_t handle, uint16_t univers
 {
   size_t total_num_network_interfaces = 0;
 
-#if SACN_SOURCE_ENABLED
   if (sacn_lock())
   {
     // Look up universe state
@@ -1226,12 +1191,29 @@ size_t sacn_source_get_network_interfaces(sacn_source_t handle, uint16_t univers
 
     sacn_unlock();
   }
-#else
-  ETCPAL_UNUSED_ARG(handle);
-  ETCPAL_UNUSED_ARG(universe);
-  ETCPAL_UNUSED_ARG(netints);
-  ETCPAL_UNUSED_ARG(netints_size);
-#endif
 
   return total_num_network_interfaces;
+}
+
+#endif  // SACN_SOURCE_ENABLED || DOXYGEN
+
+size_t get_per_universe_netint_lists_index(sacn_source_t source, uint16_t universe,
+                                           const SacnSourceUniverseNetintList* per_universe_netint_lists,
+                                           size_t num_per_universe_netint_lists, bool* found)
+{
+  for (size_t i = 0; i < num_per_universe_netint_lists; ++i)
+  {
+    if ((source == per_universe_netint_lists[i].handle) && (universe == per_universe_netint_lists[i].universe))
+    {
+      if (found)
+        *found = true;
+
+      return i;
+    }
+  }
+
+  if (found)
+    *found = false;
+
+  return 0;
 }
