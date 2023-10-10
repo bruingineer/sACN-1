@@ -42,7 +42,7 @@
 #if SACN_DYNAMIC_MEM
 
 /* Macros for dynamic allocation. */
-#define ALLOC_MERGE_RECEIVER_SOURCE() malloc(sizeof(SacnMergeReceiverSource))
+#define ALLOC_MERGE_RECEIVER_SOURCE() malloc(sizeof(SacnMergeReceiverInternalSource))
 #define FREE_MERGE_RECEIVER_SOURCE(ptr) free(ptr)
 
 #else  // SACN_DYNAMIC_MEM
@@ -56,7 +56,7 @@
 /**************************** Private variables ******************************/
 
 #if !SACN_DYNAMIC_MEM
-ETCPAL_MEMPOOL_DEFINE(sacn_pool_mergerecv_sources, SacnMergeReceiverSource, SACN_RECEIVER_TOTAL_MAX_SOURCES);
+ETCPAL_MEMPOOL_DEFINE(sacn_pool_mergerecv_sources, SacnMergeReceiverInternalSource, SACN_RECEIVER_TOTAL_MAX_SOURCES);
 ETCPAL_MEMPOOL_DEFINE(sacn_pool_mergerecv_source_rb_nodes, EtcPalRbNode, SACN_MERGE_RECEIVER_SOURCE_MAX_RB_NODES);
 #endif  // !SACN_DYNAMIC_MEM
 
@@ -80,23 +80,25 @@ etcpal_error_t init_merge_receiver_sources(void)
 }
 
 // Needs lock
-etcpal_error_t add_sacn_merge_receiver_source(SacnMergeReceiver* merge_receiver, sacn_remote_source_t source_handle,
-                                              bool pending)
+etcpal_error_t add_sacn_merge_receiver_source(SacnMergeReceiver* merge_receiver, const EtcPalSockAddr* addr,
+                                              const SacnRemoteSource* remote_source, bool sampling)
 {
+  if (!SACN_ASSERT_VERIFY(merge_receiver) || !SACN_ASSERT_VERIFY(addr) || !SACN_ASSERT_VERIFY(remote_source))
+    return kEtcPalErrSys;
+
   etcpal_error_t result = kEtcPalErrNoMem;
 
-  SacnMergeReceiverSource* src = ALLOC_MERGE_RECEIVER_SOURCE();
+  SacnMergeReceiverInternalSource* src = ALLOC_MERGE_RECEIVER_SOURCE();
   if (src)
   {
-    src->handle = source_handle;
-    src->pending = pending;
+    src->handle = remote_source->handle;
+    src->sampling = sampling;
+    update_merge_receiver_source_info(src, addr, remote_source);
 
     result = etcpal_rbtree_insert(&merge_receiver->sources, src);
 
     if (result != kEtcPalErrOk)
       FREE_MERGE_RECEIVER_SOURCE(src);
-    else if (pending)
-      ++merge_receiver->num_pending_sources;
   }
 
   return result;
@@ -104,8 +106,14 @@ etcpal_error_t add_sacn_merge_receiver_source(SacnMergeReceiver* merge_receiver,
 
 // Needs lock
 etcpal_error_t lookup_merge_receiver_source(SacnMergeReceiver* merge_receiver, sacn_remote_source_t source_handle,
-                                            SacnMergeReceiverSource** source)
+                                            SacnMergeReceiverInternalSource** source)
 {
+  if (!SACN_ASSERT_VERIFY(merge_receiver) || !SACN_ASSERT_VERIFY(source_handle != SACN_REMOTE_SOURCE_INVALID) ||
+      !SACN_ASSERT_VERIFY(source))
+  {
+    return kEtcPalErrSys;
+  }
+
   (*source) = etcpal_rbtree_find(&merge_receiver->sources, &source_handle);
   return (*source) ? kEtcPalErrOk : kEtcPalErrNotFound;
 }
@@ -113,18 +121,32 @@ etcpal_error_t lookup_merge_receiver_source(SacnMergeReceiver* merge_receiver, s
 // Needs lock
 void remove_sacn_merge_receiver_source(SacnMergeReceiver* merge_receiver, sacn_remote_source_t source_handle)
 {
-  SacnMergeReceiverSource* source = etcpal_rbtree_find(&merge_receiver->sources, &source_handle);
-  if (source->pending)
-    --merge_receiver->num_pending_sources;
+  if (!SACN_ASSERT_VERIFY(merge_receiver) || !SACN_ASSERT_VERIFY(source_handle != SACN_REMOTE_SOURCE_INVALID))
+    return;
 
-  etcpal_rbtree_remove_with_cb(&merge_receiver->sources, source, merge_receiver_sources_tree_dealloc);
+  SacnMergeReceiverInternalSource* source = etcpal_rbtree_find(&merge_receiver->sources, &source_handle);
+  if (SACN_ASSERT_VERIFY(source))
+    etcpal_rbtree_remove_with_cb(&merge_receiver->sources, source, merge_receiver_sources_tree_dealloc);
 }
 
 // Needs lock
 void clear_sacn_merge_receiver_sources(SacnMergeReceiver* merge_receiver)
 {
+  if (!SACN_ASSERT_VERIFY(merge_receiver))
+    return;
+
   etcpal_rbtree_clear_with_cb(&merge_receiver->sources, merge_receiver_sources_tree_dealloc);
-  merge_receiver->num_pending_sources = 0;
+}
+
+// Needs lock
+void update_merge_receiver_source_info(SacnMergeReceiverInternalSource* info, const EtcPalSockAddr* addr,
+                                       const SacnRemoteSource* remote_source)
+{
+  if (!SACN_ASSERT_VERIFY(info) || !SACN_ASSERT_VERIFY(addr) || !SACN_ASSERT_VERIFY(remote_source))
+    return;
+
+  memcpy(info->name, remote_source->name, SACN_SOURCE_NAME_MAX_LEN);
+  info->addr = *addr;
 }
 
 EtcPalRbNode* merge_receiver_source_node_alloc(void)
@@ -138,6 +160,9 @@ EtcPalRbNode* merge_receiver_source_node_alloc(void)
 
 void merge_receiver_source_node_dealloc(EtcPalRbNode* node)
 {
+  if (!SACN_ASSERT_VERIFY(node))
+    return;
+
 #if SACN_DYNAMIC_MEM
   free(node);
 #else
@@ -148,6 +173,10 @@ void merge_receiver_source_node_dealloc(EtcPalRbNode* node)
 void merge_receiver_sources_tree_dealloc(const EtcPalRbTree* self, EtcPalRbNode* node)
 {
   ETCPAL_UNUSED_ARG(self);
+
+  if (!SACN_ASSERT_VERIFY(node))
+    return;
+
   FREE_MERGE_RECEIVER_SOURCE(node->value);
   merge_receiver_source_node_dealloc(node);
 }

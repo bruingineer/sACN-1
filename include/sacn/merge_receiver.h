@@ -72,13 +72,25 @@ typedef struct SacnRecvMergedData
    */
   const uint8_t* levels;
   /**
+   * The merged per-address priorities for the universe at the location indicated by slot_range. This buffer is owned by
+   * the library.
+   */
+  const uint8_t* priorities;
+  /**
    * The source handles of the owners of the slots within slot_range.  If a value in the buffer is
    * #SACN_REMOTE_SOURCE_INVALID, the corresponding slot is not currently controlled. This buffer is owned by the
    * library.
    */
   const sacn_remote_source_t* owners;
   /**
-   * The current number of sources considered to be active on the current universe.
+   * The handles of all sources considered to be active on the current universe. Sources that are currently in a
+   * sampling period are not represented in the merged data and therefore aren't listed here either. This buffer is
+   * owned by the library.
+   */
+  const sacn_remote_source_t* active_sources;
+  /**
+   * The current number of sources considered to be active on the current universe (and thus the size of
+   * active_sources).
    */
   size_t num_active_sources;
 } SacnRecvMergedData;
@@ -88,19 +100,23 @@ typedef struct SacnRecvMergedData
  *
  * This callback will be called in multiple ways:
  * 1. When a new non-preview data packet or per-address priority packet is received from the sACN Receiver module,
- * it is immediately and synchronously passed to the DMX Merger. If the sampling period has not ended, the merged result
- * is not passed to this callback until the sampling period ends. Otherwise, it is immediately and synchronously passed
- * to this callback.
+ * it is immediately and synchronously passed to a DMX Merger. If the sampling period has not ended for the source,
+ * the merged result is not passed to this callback until the sampling period ends. Otherwise, it is immediately and
+ * synchronously passed to this callback.
  * 2. When a sACN source is no longer sending non-preview data or per-address priority packets, the lost source callback
- * from the sACN Receiver module will be passed to the merger, after which the merged result is passed to this callback
+ * from the sACN Receiver module will be passed to a merger, after which the merged result is passed to this callback
  * pending the sampling period.
+ *
+ * After a networking reset, some of the sources on the universe may not be included in the resulting sampling period.
+ * Therefore, expect this to continue to be called during said sampling period.
  *
  * This callback should be processed quickly, since it will interfere with the receipt and processing of other sACN
  * packets on the universe.
  *
  * @param[in] handle The handle to the merge receiver instance.
  * @param[in] merged_data The merged data (and relevant information about that data), starting from the first slot
- * of the currently configured footprint.
+ * of the currently configured footprint. Only sources that are not currently part of a sampling period are part of the
+ * merged result.
  * @param[in] context Context pointer that was given at the creation of the merge receiver instance.
  */
 typedef void (*SacnMergeReceiverMergedDataCallback)(sacn_merge_receiver_t handle, const SacnRecvMergedData* merged_data,
@@ -132,6 +148,74 @@ typedef void (*SacnMergeReceiverNonDmxCallback)(sacn_merge_receiver_t receiver_h
                                                 const SacnRecvUniverseData* universe_data, void* context);
 
 /**
+ * @brief Notify that one or more sources have entered a source loss state.
+ *
+ * This could be due to timeout or explicit termination. When reset networking is called, the sources on the
+ * removed/lost interfaces will time out, and will eventually be included in this notification.
+ *
+ * Sources are grouped using an algorithm designed to prevent level jumps when multiple sources are lost simultaneously.
+ * See @ref source_loss_behavior for more information.
+ *
+ * @param[in] handle Handle to the merge receiver instance for which sources were lost.
+ * @param[in] universe The universe this merge receiver is monitoring.
+ * @param[in] lost_sources Array of structs describing the source or sources that have been lost.
+ * @param[in] num_lost_sources Size of the lost_sources array.
+ * @param[in] context Context pointer that was given at the creation of the merge receiver instance.
+ */
+typedef void (*SacnMergeReceiverSourcesLostCallback)(sacn_merge_receiver_t handle, uint16_t universe,
+                                                     const SacnLostSource* lost_sources, size_t num_lost_sources,
+                                                     void* context);
+
+/**
+ * @brief Notify that a merge receiver's sampling period has begun.
+ *
+ * If this sampling period was due to a networking reset, some sources may not be included in it. The sources that
+ * are not part of the sampling period will continue to be included in merged data notifications.
+ *
+ * @param[in] handle Handle to the merge receiver instance for which the sampling period started.
+ * @param[in] universe The universe this merge receiver is monitoring.
+ * @param[in] context Context pointer that was given at the creation of the merge receiver instance.
+ */
+typedef void (*SacnMergeReceiverSamplingPeriodStartedCallback)(sacn_merge_receiver_t handle, uint16_t universe,
+                                                               void* context);
+
+/**
+ * @brief Notify that a merge receiver's sampling period has ended.
+ *
+ * All sources that were included in this sampling period will now officially be included in merged data
+ * notifications. If there was a networking reset during this sampling period, another sampling period may have been
+ * scheduled, in which case this will be immediately followed by a sampling period started notification.
+ *
+ * If there were any active levels received during the sampling period, they were factored into the merged data
+ * notification called immediately before this notification. If the merged data notification wasn't called before
+ * this notification, that means there currently isn't any active data on the universe.
+ *
+ * @param[in] handle Handle to the merge receiver instance for which the sampling period ended.
+ * @param[in] universe The universe this merge receiver is monitoring.
+ * @param[in] context Context pointer that was given at the creation of the merge receiver instance.
+ */
+typedef void (*SacnMergeReceiverSamplingPeriodEndedCallback)(sacn_merge_receiver_t handle, uint16_t universe,
+                                                             void* context);
+
+/**
+ * @brief Notify that a source has stopped transmission of per-address priority packets.
+ *
+ * If #SACN_ETC_PRIORITY_EXTENSION was defined to 0 when sACN was compiled, this callback will
+ * never be called and may be set to NULL. This is only called due to a timeout condition; a
+ * termination bit is treated as the termination of the entire stream and will result in a
+ * sources_lost() notification.
+ *
+ * @param[in] handle Handle to the merge receiver instance for which a source stopped sending per-address
+ *                   priority.
+ * @param[in] universe The universe this merge receiver is monitoring.
+ * @param[in] source Information about the source that has stopped transmission of per-address
+ *                   priority.
+ * @param[in] context Context pointer that was given at the creation of the merge receiver instance.
+ */
+typedef void (*SacnMergeReceiverSourcePapLostCallback)(sacn_merge_receiver_t handle, uint16_t universe,
+                                                       const SacnRemoteSource* source, void* context);
+
+/**
  * @brief Notify that more than the configured maximum number of sources are currently sending on
  *        the universe being listened to.
  *
@@ -147,9 +231,13 @@ typedef void (*SacnMergeReceiverSourceLimitExceededCallback)(sacn_merge_receiver
 /** A set of callback functions that the library uses to notify the application about sACN events. */
 typedef struct SacnMergeReceiverCallbacks
 {
-  SacnMergeReceiverMergedDataCallback universe_data;                  /**< Required */
-  SacnMergeReceiverNonDmxCallback universe_non_dmx;                   /**< Required */
-  SacnMergeReceiverSourceLimitExceededCallback source_limit_exceeded; /**< Optional */
+  SacnMergeReceiverMergedDataCallback universe_data;                      /**< Required */
+  SacnMergeReceiverNonDmxCallback universe_non_dmx;                       /**< Optional */
+  SacnMergeReceiverSourcesLostCallback sources_lost;                      /**< Optional */
+  SacnMergeReceiverSamplingPeriodStartedCallback sampling_period_started; /**< Optional */
+  SacnMergeReceiverSamplingPeriodEndedCallback sampling_period_ended;     /**< Optional */
+  SacnMergeReceiverSourcePapLostCallback source_pap_lost;                 /**< Optional */
+  SacnMergeReceiverSourceLimitExceededCallback source_limit_exceeded;     /**< Optional */
   void* callback_context; /**< (optional) Pointer to opaque data passed back with each callback. */
 } SacnMergeReceiverCallbacks;
 
@@ -199,7 +287,22 @@ typedef struct SacnMergeReceiverNetintList
   SacnMcastInterface* netints;
   /** The size of netints, or 0 if netints is NULL. */
   size_t num_netints;
+  /** If this is true, this merge receiver will not use any network interfaces for multicast traffic. */
+  bool no_netints;
 } SacnMergeReceiverNetintList;
+
+/** Information about a remote sACN source being tracked by a merge receiver. */
+typedef struct SacnMergeReceiverSource
+{
+  /** The handle of the source. */
+  sacn_remote_source_t handle;
+  /** The Component Identifier (CID) of the source. */
+  EtcPalUuid cid;
+  /** The name of the source. */
+  char name[SACN_SOURCE_NAME_MAX_LEN];
+  /** The network address from which the most recent sACN packet originated. */
+  EtcPalSockAddr addr;
+} SacnMergeReceiverSource;
 
 void sacn_merge_receiver_config_init(SacnMergeReceiverConfig* config);
 
@@ -219,6 +322,8 @@ etcpal_error_t sacn_merge_receiver_reset_networking_per_receiver(
     size_t num_per_receiver_netint_lists);
 size_t sacn_merge_receiver_get_network_interfaces(sacn_merge_receiver_t handle, EtcPalMcastNetintId* netints,
                                                   size_t netints_size);
+etcpal_error_t sacn_merge_receiver_get_source(sacn_merge_receiver_t merge_receiver_handle,
+                                              sacn_remote_source_t source_handle, SacnMergeReceiverSource* source_info);
 
 #ifdef __cplusplus
 }

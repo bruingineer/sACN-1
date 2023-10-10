@@ -63,6 +63,17 @@ public:
   /** A handle type used by the sACN library to identify source instances. */
   using Handle = etcpal::OpaqueId<detail::SourceHandleType, sacn_source_t, SACN_SOURCE_INVALID>;
 
+  /** This enum determines the type of start code (levels and/or PAP) to process/transmit in a source tick. */
+  enum class TickMode
+  {
+    /** Process/send levels only (includes termination). */
+    kProcessLevelsOnly = kSacnSourceTickModeProcessLevelsOnly,
+    /** Process/send PAP only (excludes termination). */
+    kProcessPapOnly = kSacnSourceTickModeProcessPapOnly,
+    /** Process/send everything (both levels and PAP + termination). */
+    kProcessLevelsAndPap = kSacnSourceTickModeProcessLevelsAndPap
+  };
+
   /**
    * @ingroup sacn_source_cpp
    * @brief A set of configuration settings that a source needs to initialize.
@@ -89,9 +100,13 @@ public:
     /** What IP networking the source will support. */
     sacn_ip_support_t ip_supported{kSacnIpV4AndIpV6};
 
-    /** The interval at which the source will send keep-alive packets during transmission suppression, in milliseconds.
-     */
+    /** The interval at which the source will send NULL start code keep-alive packets during transmission suppression,
+        in milliseconds. */
     int keep_alive_interval{SACN_SOURCE_KEEP_ALIVE_INTERVAL_DEFAULT};
+
+    /** The interval at which the source will send per-address priority keep-alive packets during transmission
+        suppression, in milliseconds. */
+    int pap_keep_alive_interval{SACN_SOURCE_PAP_KEEP_ALIVE_INTERVAL_DEFAULT};
 
     /** Create an empty, invalid data structure by default. */
     Settings() = default;
@@ -126,7 +141,7 @@ public:
 
     /** The initial set of unicast destinations for this universe. This can be changed further by using
         Source::AddUnicastDestination() and Source::RemoveUnicastDestination(). */
-    const std::vector<etcpal::IpAddr> unicast_destinations;
+    std::vector<etcpal::IpAddr> unicast_destinations;
 
     /** If non-zero, this is the synchronization universe used to synchronize the sACN output. Defaults to 0.
         TODO: At this time, synchronization is not supported by this library. */
@@ -146,17 +161,20 @@ public:
   struct UniverseNetintList
   {
     /** The source's handle. */
-    sacn_source_t handle;
+    sacn_source_t handle{SACN_SOURCE_INVALID};
     /** The ID of the universe. */
-    uint16_t universe;
+    uint16_t universe{0};
 
     /** If !empty, this is the list of interfaces the application wants to use, and the status codes are filled in. If
         empty, all available interfaces are tried. */
     std::vector<SacnMcastInterface> netints;
 
+    /** If this is true, this universe will not use any network interfaces for multicast traffic. */
+    bool no_netints{false};
+
     /** Create an empty, invalid data structure by default. */
     UniverseNetintList() = default;
-    UniverseNetintList(sacn_source_t source_handle, uint16_t universe_id);
+    UniverseNetintList(sacn_source_t source_handle, uint16_t universe_id, McastMode mcast_mode);
     UniverseNetintList(sacn_source_t source_handle, uint16_t universe_id,
                        const std::vector<SacnMcastInterface>& network_interfaces);
   };
@@ -172,7 +190,7 @@ public:
 
   etcpal::Error ChangeName(const std::string& new_name);
 
-  etcpal::Error AddUniverse(const UniverseSettings& settings);
+  etcpal::Error AddUniverse(const UniverseSettings& settings, McastMode mcast_mode);
   etcpal::Error AddUniverse(const UniverseSettings& settings, std::vector<SacnMcastInterface>& netints);
   void RemoveUniverse(uint16_t universe);
   std::vector<uint16_t> GetUniverses();
@@ -199,9 +217,9 @@ public:
 
   constexpr Handle handle() const;
 
-  static int ProcessManual();
+  static int ProcessManual(TickMode tick_mode);
 
-  static etcpal::Error ResetNetworking();
+  static etcpal::Error ResetNetworking(McastMode mcast_mode);
   static etcpal::Error ResetNetworking(std::vector<SacnMcastInterface>& netints);
   static etcpal::Error ResetNetworking(std::vector<SacnMcastInterface>& sys_netints,
                                        std::vector<UniverseNetintList>& netint_lists);
@@ -263,8 +281,9 @@ inline bool Source::UniverseSettings::IsValid() const
  *
  * Optional members can be modified directly in the struct.
  */
-inline Source::UniverseNetintList::UniverseNetintList(sacn_source_t source_handle, uint16_t universe_id)
-    : handle(source_handle), universe(universe_id)
+inline Source::UniverseNetintList::UniverseNetintList(sacn_source_t source_handle, uint16_t universe_id,
+                                                      McastMode mcast_mode = McastMode::kEnabledOnAllInterfaces)
+    : handle(source_handle), universe(universe_id), no_netints(mcast_mode == McastMode::kDisabledOnAllInterfaces)
 {
 }
 
@@ -342,9 +361,11 @@ inline etcpal::Error Source::ChangeName(const std::string& new_name)
 }
 
 /**
- * @brief Add a universe to an sACN source, which will use all network interfaces.
+ * @brief Add a universe to an sACN source.
  *
- * Adds a universe to a source. All network interfaces will be used.
+ * This is an overload of AddUniverse that defaults to using all system interfaces for multicast traffic, but can also
+ * be used to disable multicast traffic on all interfaces.
+ *
  * After this call completes, the applicaton must call one of the Update functions to mark it ready for processing.
  *
  * If the source is not marked as unicast_only, the source will add the universe to its sACN Universe
@@ -354,6 +375,7 @@ inline etcpal::Error Source::ChangeName(const std::string& new_name)
  * network interfaces.  This will only return #kEtcPalErrNoNetints if none of the interfaces work.
  *
  * @param[in] settings Configuration parameters for the universe to be added.
+ * @param[in] mcast_mode This controls whether or not multicast traffic is allowed for this universe.
  * @return #kEtcPalErrOk: Universe successfully added.
  * @return #kEtcPalErrNoNetints: None of the system network interfaces were usable by the library.
  * @return #kEtcPalErrInvalid: Invalid parameter provided.
@@ -363,16 +385,23 @@ inline etcpal::Error Source::ChangeName(const std::string& new_name)
  * @return #kEtcPalErrNoMem: No room to allocate additional universe.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
-inline etcpal::Error Source::AddUniverse(const UniverseSettings& settings)
+inline etcpal::Error Source::AddUniverse(const UniverseSettings& settings,
+                                         McastMode mcast_mode = McastMode::kEnabledOnAllInterfaces)
 {
   TranslatedUniverseConfig config(settings);
-  return sacn_source_add_universe(handle_.value(), &config.get(), nullptr);
+
+  SacnNetintConfig netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+  if (mcast_mode == McastMode::kDisabledOnAllInterfaces)
+    netint_config.no_netints = true;
+
+  return sacn_source_add_universe(handle_.value(), &config.get(), &netint_config);
 }
 
 /**
- * @brief Add a universe to an sACN source, which will use the network interfaces passed in.
+ * @brief Add a universe to an sACN source.
  *
- * Adds a universe to a source. Only the network interfaces passed in will be used.
+ * Only the network interfaces passed in will be used.
+ *
  * After this call completes, the applicaton must call one of the Update functions to mark it ready for processing.
  *
  * If the source is not marked as unicast_only, the source will add the universe to its sACN Universe
@@ -400,7 +429,10 @@ inline etcpal::Error Source::AddUniverse(const UniverseSettings& settings, std::
   if (netints.empty())
     return sacn_source_add_universe(handle_.value(), &config.get(), nullptr);
 
-  SacnNetintConfig netint_config = {netints.data(), netints.size()};
+  SacnNetintConfig netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+  netint_config.netints = netints.data();
+  netint_config.num_netints = netints.size();
+
   return sacn_source_add_universe(handle_.value(), &config.get(), &netint_config);
 }
 
@@ -421,7 +453,7 @@ inline void Source::RemoveUniverse(uint16_t universe)
 }
 
 /**
- * @brief Obtain a vector of this source's universes.
+ * @brief Obtain a vector of this source's universes (sorted lowest to highest).
  *
  * @return A vector of this source's universes.
  */
@@ -596,6 +628,7 @@ inline etcpal::Error Source::ChangeSynchronizationUniverse(uint16_t universe, ui
  * @return #kEtcPalErrNotFound: Handle does not correspond to a valid source, or the universe was not found on this
  *                              source.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
+ * @return The last error returned by etcpal_sendto() if all sends failed.
  */
 inline etcpal::Error Source::SendNow(uint16_t universe, uint8_t start_code, const uint8_t* buffer, size_t buflen)
 {
@@ -729,26 +762,27 @@ inline void Source::UpdateLevelsAndPapAndForceSync(uint16_t universe, const uint
  *
  * Note: Unless you created the source with manually_process_source set to true, similar functionality will be
  * automatically called by an internal thread of the module. Otherwise, this must be called at the maximum rate
- * at which the application will send sACN.
+ * at which the application will send sACN (see tick_mode for details of what is actually sent in a call).
  *
  * Sends the current data for universes which have been updated, and sends keep-alive data for universes which
- * haven't been updated. Also destroys sources & universes that have been marked for termination after sending the
- * required three terminated packets.
+ * haven't been updated. If levels are processed (see tick_mode), this also destroys sources & universes that have been
+ * marked for termination after sending the required three terminated packets.
  *
+ * @param[in] tick_mode Specifies whether to process levels (and by extension termination) and/or PAP.
  * @return Current number of manual sources tracked by the library, including sources that have been destroyed but are
  * still sending termination packets. This can be useful on shutdown to track when destroyed sources have finished
  * sending the terminated packets and actually been destroyed.
  */
-inline int Source::ProcessManual()
+inline int Source::ProcessManual(TickMode tick_mode = TickMode::kProcessLevelsAndPap)
 {
-  return sacn_source_process_manual();
+  return sacn_source_process_manual(static_cast<sacn_source_tick_mode_t>(tick_mode));
 }
 
 /**
  * @brief Resets the underlying network sockets for all universes of all sources.
  *
- * This is the overload of
- * ResetNetworking that uses all network interfaces.
+ * This is an overload of ResetNetworking that defaults to using all system interfaces for multicast traffic, but can
+ * also be used to disable multicast traffic on all interfaces.
  *
  * This is typically used when the application detects that the list of networking interfaces has changed. The source
  * API will no longer be limited to specific interfaces (the list passed into sacn::Init(), if any, is overridden for
@@ -763,15 +797,19 @@ inline int Source::ProcessManual()
  * Note that the networking reset is considered successful if it is able to successfully use any of the
  * network interfaces.  This will only return #kEtcPalErrNoNetints if none of the interfaces work.
  *
+ * @param[in] mcast_mode This controls whether or not multicast traffic is allowed for this universe.
  * @return #kEtcPalErrOk: Networking reset successfully.
  * @return #kEtcPalErrNoNetints: None of the network interfaces were usable by the library.
  * @return #kEtcPalErrNotInit: Module not initialized.
  * @return #kEtcPalErrSys: An internal library or system call error occurred.
  */
-inline etcpal::Error Source::ResetNetworking()
+inline etcpal::Error Source::ResetNetworking(McastMode mcast_mode = McastMode::kEnabledOnAllInterfaces)
 {
-  std::vector<SacnMcastInterface> netints;
-  return ResetNetworking(netints);
+  SacnNetintConfig netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+  if (mcast_mode == McastMode::kDisabledOnAllInterfaces)
+    netint_config.no_netints = true;
+
+  return sacn_source_reset_networking(&netint_config);
 }
 
 /**
@@ -803,7 +841,10 @@ inline etcpal::Error Source::ResetNetworking(std::vector<SacnMcastInterface>& sy
   if (sys_netints.empty())
     return sacn_source_reset_networking(nullptr);
 
-  SacnNetintConfig netint_config = {sys_netints.data(), sys_netints.size()};
+  SacnNetintConfig netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+  netint_config.netints = sys_netints.data();
+  netint_config.num_netints = sys_netints.size();
+
   return sacn_source_reset_networking(&netint_config);
 }
 
@@ -841,22 +882,25 @@ inline etcpal::Error Source::ResetNetworking(std::vector<SacnMcastInterface>& sy
 {
   std::vector<SacnSourceUniverseNetintList> netint_lists_c;
   netint_lists_c.reserve(per_universe_netint_lists.size());
-  std::transform(
-      per_universe_netint_lists.begin(), per_universe_netint_lists.end(), std::back_inserter(netint_lists_c),
-      [](UniverseNetintList& list) {
-        // clang-format off
+  std::transform(per_universe_netint_lists.begin(), per_universe_netint_lists.end(), std::back_inserter(netint_lists_c),
+                 [](UniverseNetintList& list) {
+                   // clang-format off
         SacnSourceUniverseNetintList c_list = {
           list.handle,
           list.universe,
           list.netints.data(),
-          list.netints.size()
+          list.netints.size(),
+          list.no_netints
         };
-        // clang-format on
+                   // clang-format on
 
-        return c_list;
-      });
+                   return c_list;
+                 });
 
-  SacnNetintConfig sys_netint_config = {sys_netints.data(), sys_netints.size()};
+  SacnNetintConfig sys_netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+  sys_netint_config.netints = sys_netints.data();
+  sys_netint_config.num_netints = sys_netints.size();
+
   return sacn_source_reset_networking_per_universe(&sys_netint_config, netint_lists_c.data(), netint_lists_c.size());
 }
 
@@ -903,7 +947,8 @@ inline SacnSourceConfig Source::TranslateConfig(const Settings& settings)
     settings.universe_count_max,
     settings.manually_process_source,
     settings.ip_supported,
-    settings.keep_alive_interval
+    settings.keep_alive_interval,
+    settings.pap_keep_alive_interval
   };
   // clang-format on
 

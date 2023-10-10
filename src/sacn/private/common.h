@@ -58,6 +58,8 @@ extern "C" {
 #define SACN_DISCOVERY_UNIVERSE 64214
 #define SACN_UNIVERSE_DISCOVERY_INTERVAL 10000
 
+#define SACN_STATS_LOG_INTERVAL 10000
+
 /* The source-loss timeout, defined in E1.31 as network data loss */
 #define SACN_SOURCE_LOSS_TIMEOUT 2500
 /* How long to wait for a 0xdd packet once a new source is discovered */
@@ -68,9 +70,16 @@ extern "C" {
 /*
  * This ensures there are always enough SocketRefs. This is multiplied by 2 because SocketRefs come in pairs - one for
  * IPv4, and another for IPv6. This is because a single SocketRef cannot intermix IPv4 and IPv6.
+ *
+ * If SACN_RECEIVER_SOCKET_PER_NIC is enabled, this is further multiplied by the max number of NICs.
  */
+#if SACN_RECEIVER_SOCKET_PER_NIC
+#define SACN_RECEIVER_MAX_SOCKET_REFS \
+  ((((SACN_RECEIVER_MAX_UNIVERSES - 1) / SACN_RECEIVER_MAX_SUBS_PER_SOCKET) + 1) * 2 * SACN_MAX_NETINTS)
+#else
 #define SACN_RECEIVER_MAX_SOCKET_REFS \
   ((((SACN_RECEIVER_MAX_UNIVERSES - 1) / SACN_RECEIVER_MAX_SUBS_PER_SOCKET) + 1) * 2)
+#endif
 
 typedef unsigned int sacn_thread_id_t;
 #define SACN_THREAD_ID_INVALID UINT_MAX
@@ -97,7 +106,7 @@ typedef unsigned int sacn_thread_id_t;
     (SACN_SOURCE_DETECTOR_MAX_UNIVERSES_PER_SOURCE > 0)) ||                                 \
    SACN_DYNAMIC_MEM)
 
-#define SACN_MERGE_RECEIVER_ENABLED (SACN_MERGE_RECEIVER_ENABLE || SACN_DYNAMIC_MEM)
+#define SACN_MERGE_RECEIVER_ENABLED (SACN_MERGE_RECEIVER_ENABLE_IN_STATIC_MEMORY_MODE || SACN_DYNAMIC_MEM)
 
 #if SACN_SOURCE_DETECTOR_ENABLED
 #define SACN_MAX_SUBSCRIPTIONS ((SACN_RECEIVER_MAX_UNIVERSES + 1) * 2)
@@ -199,6 +208,19 @@ typedef struct SacnInternalNetintArray
   size_t num_netints;
 } SacnInternalNetintArray;
 
+typedef struct SacnInternalSocketState
+{
+#if SACN_RECEIVER_SOCKET_PER_NIC
+  SACN_DECLARE_BUF(etcpal_socket_t, ipv4_sockets, SACN_MAX_NETINTS);
+  SACN_DECLARE_BUF(etcpal_socket_t, ipv6_sockets, SACN_MAX_NETINTS);
+  size_t num_ipv4_sockets;
+  size_t num_ipv6_sockets;
+#else
+  etcpal_socket_t ipv4_socket;
+  etcpal_socket_t ipv6_socket;
+#endif
+} SacnInternalSocketState;
+
 /******************************************************************************
  * Types used by the source loss module
  *****************************************************************************/
@@ -226,11 +248,18 @@ struct TerminationSet
   TerminationSet* next;
 };
 
+/* A key to uniquely identify a source in a termination set. */
+typedef struct TerminationSetSourceKey
+{
+  sacn_remote_source_t handle;
+  uint16_t universe;
+} TerminationSetSourceKey;
+
 /* A source in a termination set. Sources are removed from the termination set as they are
  * determined to be online. */
 typedef struct TerminationSetSource
 {
-  sacn_remote_source_t handle;  // Must remain the first element in the struct for red-black tree lookup.
+  TerminationSetSourceKey key;  // Must remain the first element in the struct for red-black tree lookup.
   const char* name;
   bool offline;
   bool terminated;
@@ -246,8 +275,7 @@ typedef struct SacnSourceDetector
   sacn_thread_id_t thread_id;
 
   // Sockets / network interface info
-  etcpal_socket_t ipv4_socket;
-  etcpal_socket_t ipv6_socket;
+  SacnInternalSocketState sockets;
   /* Array of network interfaces on which to listen to the specified universe. */
   SacnInternalNetintArray netints;
 
@@ -431,8 +459,7 @@ struct SacnReceiver
   sacn_thread_id_t thread_id;
 
   // Sockets / network interface info
-  etcpal_socket_t ipv4_socket;
-  etcpal_socket_t ipv6_socket;
+  SacnInternalSocketState sockets;
   /* Array of network interfaces on which to listen to the specified universe. */
   SacnInternalNetintArray netints;
 
@@ -440,6 +467,8 @@ struct SacnReceiver
   bool sampling;
   bool notified_sampling_started;
   EtcPalTimer sample_timer;
+  EtcPalRbTree sampling_period_netints;
+
   bool suppress_limit_exceeded_notification;
   EtcPalRbTree sources;       // The sources being tracked on this universe.
   TerminationSet* term_sets;  // Source loss tracking
@@ -476,9 +505,9 @@ typedef struct SacnSourceStatusLists
 #if SACN_ETC_PRIORITY_EXTENSION
 typedef enum
 {
-  kRecvStateWaitingForDmx,
   kRecvStateWaitingForPap,
   kRecvStateHaveDmxOnly,
+  kRecvStateHavePapOnly,
   kRecvStateHaveDmxAndPap
 } sacn_recv_state_t;
 #endif
@@ -488,6 +517,8 @@ typedef struct SacnTrackedSource
 {
   sacn_remote_source_t handle;  // This must be the first member of this struct.
   char name[SACN_SOURCE_NAME_MAX_LEN];
+  EtcPalMcastNetintId netint;
+
   EtcPalTimer packet_timer;
   uint8_t seq;
   bool terminated;
@@ -518,6 +549,12 @@ typedef enum
   kPerformAllSocketCleanupNow,
   kQueueSocketCleanup
 } socket_cleanup_behavior_t;
+
+typedef struct SacnSamplingPeriodNetint
+{
+  EtcPalMcastNetintId id;          // This must be the first member of this struct.
+  bool in_future_sampling_period;  // True if this is in the NEXT sampling period, false if in the current one.
+} SacnSamplingPeriodNetint;
 
 /******************************************************************************
  * Notifications delivered by the sACN receive module
@@ -600,6 +637,9 @@ typedef struct ReceiveSocket
   etcpal_iptype_t ip_type; /* The IP type used in multicast subscriptions and the bind address. */
   bool bound;              /* True if bind was called on this socket, false otherwise. */
   bool polling;            /* True if this socket was added to a poll context, false otherwise. */
+#if SACN_RECEIVER_SOCKET_PER_NIC
+  unsigned int ifindex; /* Index of network interface on which this socket is subscribed. */
+#endif
 } ReceiveSocket;
 
 #define RECV_SOCKET_DEFAULT_INIT                              \
@@ -667,25 +707,34 @@ typedef struct SacnRecvThreadContext
 /******************************************************************************
  * Types used by the sACN Merge Receiver module
  *****************************************************************************/
-typedef struct SacnMergeReceiverSource
+typedef struct SacnMergeReceiverInternalSource
 {
   sacn_remote_source_t handle;  // This must be the first struct member.
-  bool pending;
-} SacnMergeReceiverSource;
+  char name[SACN_SOURCE_NAME_MAX_LEN];
+  EtcPalSockAddr addr;
+  bool sampling;
+} SacnMergeReceiverInternalSource;
 
 typedef struct SacnMergeReceiver
 {
-  sacn_merge_receiver_t merge_receiver_handle;
-  sacn_dmx_merger_t merger_handle;
+  sacn_merge_receiver_t merge_receiver_handle;  // This must be the first struct member.
   SacnMergeReceiverCallbacks callbacks;
   bool use_pap;
 
+  sacn_dmx_merger_t merger_handle;
   uint8_t levels[DMX_ADDRESS_COUNT];
+  uint8_t priorities[DMX_ADDRESS_COUNT];
   sacn_dmx_merger_source_t owners[DMX_ADDRESS_COUNT];
+
+#if SACN_MERGE_RECEIVER_ENABLE_SAMPLING_MERGER
+  sacn_dmx_merger_t sampling_merger_handle;
+  uint8_t sampling_levels[DMX_ADDRESS_COUNT];
+  uint8_t sampling_priorities[DMX_ADDRESS_COUNT];
+  sacn_dmx_merger_source_t sampling_owners[DMX_ADDRESS_COUNT];
+#endif
 
   EtcPalRbTree sources;
 
-  int num_pending_sources;
   bool sampling;
 } SacnMergeReceiver;
 
@@ -700,28 +749,11 @@ typedef struct MergeReceiverMergedDataNotification
   uint16_t universe;
   SacnRecvUniverseSubrange slot_range;
   uint8_t levels[DMX_ADDRESS_COUNT];
+  uint8_t priorities[DMX_ADDRESS_COUNT];
   sacn_remote_source_t owners[DMX_ADDRESS_COUNT];
+  SACN_DECLARE_MERGE_RECEIVER_BUF(sacn_remote_source_t, active_sources, SACN_RECEIVER_MAX_SOURCES_PER_UNIVERSE);
   size_t num_active_sources;
-  void* context;
 } MergeReceiverMergedDataNotification;
-
-typedef struct MergeReceiverNonDmxNotification
-{
-  SacnMergeReceiverNonDmxCallback callback;
-  sacn_merge_receiver_t receiver_handle;
-  const EtcPalSockAddr* source_addr;
-  const SacnRemoteSource* source_info;
-  const SacnRecvUniverseData* universe_data;
-  void* context;
-} MergeReceiverNonDmxNotification;
-
-typedef struct MergeReceiverSourceLimitExceededNotification
-{
-  SacnMergeReceiverSourceLimitExceededCallback callback;
-  sacn_merge_receiver_t handle;
-  uint16_t universe;
-  void* context;
-} MergeReceiverSourceLimitExceededNotification;
 
 /******************************************************************************
  * Types used by the sACN Source module
@@ -745,6 +777,7 @@ typedef struct SacnUnicastDestination
   EtcPalIpAddr dest_addr;  // This must be the first struct member.
   termination_state_t termination_state;
   int num_terminations_sent;
+  etcpal_error_t last_send_error;
 } SacnUnicastDestination;
 
 typedef struct SacnSourceUniverse
@@ -757,13 +790,14 @@ typedef struct SacnSourceUniverse
   uint8_t priority;
   uint16_t sync_universe;
   bool send_preview;
-  uint8_t seq_num;
+  uint8_t next_seq_num;
 
   // Start code 0x00 state
   int level_packets_sent_before_suppression;
   EtcPalTimer level_keep_alive_timer;
   uint8_t level_send_buf[SACN_DATA_PACKET_MTU];
   bool has_level_data;
+  bool levels_sent_this_tick;
 
 #if SACN_ETC_PRIORITY_EXTENSION
   // Start code 0xDD state
@@ -771,11 +805,17 @@ typedef struct SacnSourceUniverse
   EtcPalTimer pap_keep_alive_timer;
   uint8_t pap_send_buf[SACN_DATA_PACKET_MTU];
   bool has_pap_data;
+  bool pap_sent_this_tick;
 #endif
+
+  bool other_sent_this_tick;
+  bool anything_sent_this_tick;
 
   SACN_DECLARE_BUF(SacnUnicastDestination, unicast_dests, SACN_MAX_UNICAST_DESTINATIONS_PER_UNIVERSE);
   size_t num_unicast_dests;
   bool send_unicast_only;
+
+  etcpal_error_t last_send_error;
 
   SacnInternalNetintArray netints;
 } SacnSourceUniverse;
@@ -796,7 +836,12 @@ typedef struct SacnSource
   bool process_manually;
   sacn_ip_support_t ip_supported;
   int keep_alive_interval;
+  int pap_keep_alive_interval;
   size_t universe_count_max;
+
+  EtcPalTimer stats_log_timer;  // Maintains a repeating interval, at the end of which statistics are logged
+  int total_tick_count;         // The total number of ticks this interval
+  int failed_tick_count;        // The number of ticks this interval that failed at least one send
 
   // This is the set of unique netints used by all universes of this source, to be used when transmitting universe
   // discovery packets.

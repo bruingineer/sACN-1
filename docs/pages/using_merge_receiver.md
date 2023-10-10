@@ -35,12 +35,15 @@ config.universe_id = 1; // Listen on universe 1
 // Set the callback functions - defined elsewhere
 config.callbacks.universe_data = my_universe_data_callback;
 config.callbacks.universe_non_dmx = my_universe_non_dmx_callback;
+config.callbacks.sources_lost = my_sources_lost_callback;
+config.callbacks.sampling_period_started = my_sampling_started_callback;
+config.callbacks.sampling_period_ended = my_sampling_ended_callback;
 config.callbacks.source_limit_exceeded = my_source_limit_exceeded_callback; // optional, can be NULL
 
 SacnMcastInterface my_netints[NUM_MY_NETINTS];
 // Assuming my_netints and NUM_MY_NETINTS are initialized by the application...
 
-SacnNetintConfig netint_config;
+SacnNetintConfig netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
 netint_config.netints = my_netints;
 netint_config.num_netints = NUM_MY_NETINTS;
 
@@ -61,12 +64,15 @@ sacn_merge_receiver_destroy(my_merge_receiver_handle);
 class MyNotifyHandler : public sacn::MergeReceiver::NotifyHandler
 {
   // Required callbacks that must be implemented:
-  void HandleMergedData(Handle handle, const SacnRecvMergedData& merged_data) override;
-  void HandleNonDmxData(Handle receiver_handle, const etcpal::SockAddr& source_addr,
+  void HandleMergedData(sacn::MergeReceiver::Handle handle, const SacnRecvMergedData& merged_data) override;
+  void HandleNonDmxData(sacn::MergeReceiver::Handle receiver_handle, const etcpal::SockAddr& source_addr,
                         const SacnRemoteSource& source_info, const SacnRecvUniverseData& universe_data) override;
 
-  // Optional callback - this doesn't have to be a part of MyNotifyHandler:
-  void HandleSourceLimitExceeded(Handle handle, uint16_t universe) override;
+  // Optional callbacks - these don't have to be a part of MyNotifyHandler:
+  void HandleSourcesLost(sacn::MergeReceiver::Handle handle, uint16_t universe, const std::vector<SacnLostSource>& lost_sources) override;
+  void HandleSamplingPeriodStarted(sacn::MergeReceiver::Handle handle, uint16_t universe) override;
+  void HandleSamplingPeriodEnded(sacn::MergeReceiver::Handle handle, uint16_t universe) override;
+  void HandleSourceLimitExceeded(sacn::MergeReceiver::Handle handle, uint16_t universe) override;
 };
 
 // Now to set up a merge receiver:
@@ -175,21 +181,23 @@ the source with the highest level. That is the Highest Takes Precedence (HTP) me
 
 ## Receiving sACN Data
 
-The merged data callback is called whenever there are new merge results, pending the sampling
-period. The sampling period occurs when a receiver starts listening on a new universe, new
-footprint, or new set of interfaces. Universe data is merged as it comes in during this period, but
-the notification of this data doesn't occur until after the sampling period ends. This removes
-flicker as various sources in the network are discovered.
+The merged data callback is called whenever there are new merge results. These results only include
+sources that are not in a sampling period. The sampling period occurs when a receiver starts
+listening on a new universe, new footprint, or new set of interfaces. While a source is part of a
+sampling period, its universe data is merged as it comes in, but won't be included in a merged data
+notification until after the sampling period ends. This removes flicker as various sources in the
+network are discovered. Some sources might not be part of a sampling period. In that case, their
+universe data will continue being included in merged data notifications during the period.
 
 This callback will be called in multiple ways:
 
 1. When a new non-preview data packet or per-address priority packet is received from the sACN 
-Receiver module, it is immediately and synchronously passed to the DMX Merger. If the sampling
-period has not ended, the merged result is not passed to this callback until the sampling period
-ends. Otherwise, it is immediately and synchronously passed to this callback.
+Receiver module, it is immediately and synchronously passed to a DMX Merger. If the sampling
+period has not ended for the source, the merged result is not passed to this callback until the
+sampling period ends. Otherwise, it is immediately and synchronously passed to this callback.
 
 2. When a sACN source is no longer sending non-preview data or per-address priority packets, the
-lost source callback from the sACN Receiver module will be passed to the merger, after which the
+lost source callback from the sACN Receiver module will be passed to a merger, after which the
 merged result is passed to this callback pending the sampling period.
 
 Please note that per-address priority is an ETC-specific sACN extension, and is disabled if the
@@ -244,7 +252,7 @@ void my_universe_data_callback(sacn_merge_receiver_t handle, const SacnRecvMerge
 ```
 <!-- CODE_BLOCK_MID -->
 ```cpp
-void MyNotifyHandler::HandleMergedData(Handle handle, const SacnRecvMergedData& merged_data)
+void MyNotifyHandler::HandleMergedData(sacn::MergeReceiver::Handle handle, const SacnRecvMergedData& merged_data)
 {
   // You wouldn't normally print a message on each sACN update, but this is just to demonstrate the
   // fields available:
@@ -296,7 +304,7 @@ void my_universe_non_dmx_callback(sacn_merge_receiver_t receiver_handle, const E
 ```
 <!-- CODE_BLOCK_MID -->
 ```cpp
-void MyNotifyHandler::HandleNonDmxData(Handle receiver_handle, const etcpal::SockAddr& source_addr,
+void MyNotifyHandler::HandleNonDmxData(sacn::MergeReceiver::Handle receiver_handle, const etcpal::SockAddr& source_addr,
                                        const SacnRemoteSource& source_info, const SacnRecvUniverseData& universe_data)
 {
   // You wouldn't normally print a message on each sACN update, but this is just to demonstrate the
@@ -313,11 +321,11 @@ void MyNotifyHandler::HandleNonDmxData(Handle receiver_handle, const etcpal::Soc
 ## Tracking Sources
 
 The data callbacks include data originating from one or more sources transmitting on the current
-universe. Each source has a _Component Identifier_ (CID), which is a UUID that is unique to that
-source. Each source also has a handle that should be used as a primary key, differentiating it
-from other sources. This source data is provided directly in the non-DMX callback, in the
-#SacnRemoteSource struct. However, in the merged data callback, only the source handles are
-passed in. To obtain the CID in this case, use the get source CID function.
+universe. Each source has a handle that serves as a primary key, differentiating it from other
+sources. The merge receiver provides information about each source that's active on the current
+universe, including the name, IP, and CID. This information is provided directly in the non-DMX
+callback. However, in the merged data callback, only the source handles are passed in. To obtain
+more details about a source, use the get source function.
 
 <!-- CODE_BLOCK_START -->
 ```c
@@ -325,35 +333,59 @@ void my_universe_data_callback(sacn_merge_receiver_t handle, const SacnRecvMerge
 {
   // Check handle and/or context as necessary...
 
-  for(unsigned int i = 0; i < merged_data->slot_range.address_count; ++i)
+  // There are two ways to iterate the sources. The first is to iterate each unique active source on the universe:
+  for(size_t i = 0; i < merged_data->num_active_sources; ++i)
   {
-    EtcPalUuid cid;
-    etcpal_error_t result = sacn_get_remote_source_cid(merged_data->owners[i], &cid);
+    SacnMergeReceiverSource source_info;
+    etcpal_error_t result = sacn_merge_receiver_get_source(handle, merged_data->active_sources[i], &source_info);
 
     if(result == kEtcPalErrOk)
     {
       // You wouldn't normally print a message on each sACN update, but this is just for demonstration:
       char cid_str[ETCPAL_UUID_STRING_BYTES];
-      etcpal_uuid_to_string(&cid, cid_str);
+      etcpal_uuid_to_string(&source_info.cid, cid_str);
 
-      printf("Slot %u CID: %s\n", (merged_data->slot_range.start_address + i), cid_str);
+      char ip_str[ETCPAL_IP_STRING_BYTES];
+      etcpal_ip_to_string(&source_info.addr.ip, ip_str);
+
+      printf("Slot %u -\n\tCID: %s\n\tName: %s\n\tAddress: %s:%u\n", (merged_data->slot_range.start_address + i), cid_str,
+             source_info.name, ip_str, source_info.addr.port);
     }
+  }
+
+  // The second way is to iterate the winner/owner of each slot:
+  for(unsigned int i = 0; i < merged_data->slot_range.address_count; ++i)
+  {
+    SacnMergeReceiverSource source_info;
+    etcpal_error_t result = sacn_merge_receiver_get_source(handle, merged_data->owners[i], &source_info);
+    // ...
   }
 }
 ```
 <!-- CODE_BLOCK_MID -->
 ```cpp
-void MyNotifyHandler::HandleMergedData(Handle handle, const SacnRecvMergedData& merged_data)
+void MyNotifyHandler::HandleMergedData(sacn::MergeReceiver::Handle handle, const SacnRecvMergedData& merged_data)
 {
-  for(unsigned int i = 0; i < merged_data.slot_range.address_count; ++i)
-  {
-    auto cid = sacn::GetRemoteSourceCid(merged_data.owners[i]);
+  // How to get the merge receiver instance from the handle is application-defined. For example:
+  auto merge_receiver = my_app_state.GetMergeReceiver(handle);
 
-    if(cid)
+  // There are two ways to iterate the sources. The first is to iterate each unique active source on the universe:
+  for(size_t i = 0u; i < merged_data.num_active_sources; ++i)
+  {
+    auto source = merge_receiver.GetSource(merged_data.active_sources[i]);
+    if(source)
     {
       // You wouldn't normally print a message on each sACN update, but this is just for demonstration:
-      std::cout << "Slot " << (merged_data.slot_range.start_address + i) << " CID: " << cid->ToString() << "\n";
+      std::cout << "Slot " << (merged_data.slot_range.start_address + i) << " -\n\tCID: " << source->cid.ToString()
+                << "\n\tName: " << source->name << "\n\tAddress: " << source->addr.ToString() << "\n";
     }
+  }
+
+  // The second way is to iterate the winner/owner of each slot:
+  for(unsigned int i = 0; i < merged_data.slot_range.address_count; ++i)
+  {
+    auto source = merge_receiver.GetSource(merged_data.owners[i]);
+    // ...
   }
 }
 ```
@@ -388,7 +420,7 @@ void my_source_limit_exceeded_callback(sacn_merge_receiver_t handle, uint16_t un
 ```
 <!-- CODE_BLOCK_MID -->
 ```cpp
-void MyNotifyHandler::HandleSourceLimitExceeded(Handle handle, uint16_t universe)
+void MyNotifyHandler::HandleSourceLimitExceeded(sacn::MergeReceiver::Handle handle, uint16_t universe)
 {
   // Handle the condition in an application-defined way. Maybe log it?
 }

@@ -8,18 +8,23 @@ set(SACN_PUBLIC_HEADERS
   ${SACN_INCLUDE}/sacn/version.h
   ${SACN_INCLUDE}/sacn/dmx_merger.h
   ${SACN_INCLUDE}/sacn/source_detector.h
+  ${SACN_INCLUDE}/sacn/cpp/common.h
+  ${SACN_INCLUDE}/sacn/cpp/dmx_merger.h
+  ${SACN_INCLUDE}/sacn/cpp/merge_receiver.h
+  ${SACN_INCLUDE}/sacn/cpp/receiver.h
+  ${SACN_INCLUDE}/sacn/cpp/source_detector.h
+  ${SACN_INCLUDE}/sacn/cpp/source.h
 )
 set(SACN_MEM_HEADERS
   ${SACN_SRC}/sacn/private/mem.h
   ${SACN_SRC}/sacn/private/mem/merge_receiver/merge_receiver.h
   ${SACN_SRC}/sacn/private/mem/merge_receiver/merge_receiver_source.h
   ${SACN_SRC}/sacn/private/mem/merge_receiver/merged_data.h
-  ${SACN_SRC}/sacn/private/mem/merge_receiver/non_dmx.h
-  ${SACN_SRC}/sacn/private/mem/merge_receiver/source_limit_exceeded.h
   ${SACN_SRC}/sacn/private/mem/receiver/receiver.h
   ${SACN_SRC}/sacn/private/mem/receiver/recv_thread_context.h
   ${SACN_SRC}/sacn/private/mem/receiver/remote_source.h
   ${SACN_SRC}/sacn/private/mem/receiver/sampling_ended.h
+  ${SACN_SRC}/sacn/private/mem/receiver/sampling_period_netint.h
   ${SACN_SRC}/sacn/private/mem/receiver/sampling_started.h
   ${SACN_SRC}/sacn/private/mem/receiver/source_limit_exceeded.h
   ${SACN_SRC}/sacn/private/mem/receiver/source_pap_lost.h
@@ -58,12 +63,11 @@ set(SACN_MEM_SOURCES
   ${SACN_SRC}/sacn/mem/merge_receiver/merge_receiver.c
   ${SACN_SRC}/sacn/mem/merge_receiver/merge_receiver_source.c
   ${SACN_SRC}/sacn/mem/merge_receiver/merged_data.c
-  ${SACN_SRC}/sacn/mem/merge_receiver/non_dmx.c
-  ${SACN_SRC}/sacn/mem/merge_receiver/source_limit_exceeded.c
   ${SACN_SRC}/sacn/mem/receiver/receiver.c
   ${SACN_SRC}/sacn/mem/receiver/recv_thread_context.c
   ${SACN_SRC}/sacn/mem/receiver/remote_source.c
   ${SACN_SRC}/sacn/mem/receiver/sampling_ended.c
+  ${SACN_SRC}/sacn/mem/receiver/sampling_period_netint.c
   ${SACN_SRC}/sacn/mem/receiver/sampling_started.c
   ${SACN_SRC}/sacn/mem/receiver/source_limit_exceeded.c
   ${SACN_SRC}/sacn/mem/receiver/source_pap_lost.c

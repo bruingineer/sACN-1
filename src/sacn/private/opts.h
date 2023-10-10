@@ -95,11 +95,27 @@
 #define SACN_LOG_MSG_PREFIX "sACN: "
 #endif
 
+/* Assertion failure handler */
+bool sacn_assert_verify_fail(const char* exp, const char* file, const char* func, const int line);
+
 /**
- * @brief The debug assert used by the sACN library.
+ * @brief The assertion handler used by the sACN library.
  *
- * By default, just uses the C library assert. If redefining this, it must be redefined as a macro
- * taking a single argument (the assertion expression).
+ * By default, evaluates to true on success, or false on failure (additionally asserting and logging). If redefining
+ * this, it must be redefined as a macro taking a single argument (the assertion expression).
+ */
+#ifndef SACN_ASSERT_VERIFY
+#define SACN_ASSERT_VERIFY(exp) ((exp) ? true : sacn_assert_verify_fail(#exp, __FILE__, __func__, __LINE__))
+#endif
+
+/**
+ * @brief The lower-level debug assert used by the sACN library.
+ *
+ * This is the assertion that gets called by #SACN_ASSERT_VERIFY on failure. Redefine this to retain the logging done by
+ * the default #SACN_ASSERT_VERIFY macro.
+ *
+ * By default, just uses the C library assert. If redefining this, it must be redefined as a macro taking a single
+ * argument (the assertion expression).
  */
 #ifndef SACN_ASSERT
 #include <assert.h>
@@ -219,7 +235,7 @@
 #endif
 
 /**
- * @brief The total maximum number of sources that can be tracked.
+ * @brief The total maximum number of sources that can be tracked in all universes.
  *
  * If this is set to 0, the Receiver, Merge Receiver, and Source Detector APIs are disabled and no memory pools are
  * allocated for them.
@@ -228,6 +244,8 @@
  * #SACN_RECEIVER_MAX_SOURCES_PER_UNIVERSE, but can be made lower if an application wants to impose a
  * global hard source limit. The total number of sources that will be handled will be the lower of
  * #SACN_RECEIVER_TOTAL_MAX_SOURCES and (#SACN_RECEIVER_MAX_UNIVERSES * #SACN_RECEIVER_MAX_SOURCES_PER_UNIVERSE).
+ *
+ * Note that this limit counts the same remote source on multiple universes as multiple sources, one per universe.
  */
 #ifndef SACN_RECEIVER_TOTAL_MAX_SOURCES
 #define SACN_RECEIVER_TOTAL_MAX_SOURCES (SACN_RECEIVER_MAX_UNIVERSES * SACN_RECEIVER_MAX_SOURCES_PER_UNIVERSE)
@@ -250,6 +268,28 @@
  */
 #ifndef SACN_RECEIVER_LIMIT_BIND
 #define SACN_RECEIVER_LIMIT_BIND (!_WIN32 && !__APPLE__)
+#endif
+
+/**
+ * @brief Configure whether or not to use the PKTINFO sockopts to determine which NIC received a packet.
+ *
+ * If set to 0, the corresponding PKTINFO sockopts for IPv4 and/or IPv6 are enabled, and the NIC is obtained from
+ * ancillary data via recvmsg. This is not supported on Windows due to performance issues that occur when either of the
+ * PKTINFO sockopts are enabled.
+ *
+ * If set to 1, a socket will only be able to subscribe on one NIC instead of all of them. This will result in the
+ * creation of more sockets to cover all the NICs on the system. The NIC will then be determined by the socket that
+ * received the data. This will likely not work on Linux or lwIP, since each bound socket is susceptible to receiving
+ * data from subscriptions on other sockets.
+ *
+ * Don't change this option unless you know what you're doing.
+ */
+#ifdef SACN_RECEIVER_SOCKET_PER_NIC
+#if !SACN_RECEIVER_SOCKET_PER_NIC && _WIN32
+#error "Error: SACN_RECEIVER_SOCKET_PER_NIC was set to 0 on Windows, which is not supported due to performance issues."
+#endif
+#else
+#define SACN_RECEIVER_SOCKET_PER_NIC (_WIN32)
 #endif
 
 /**
@@ -331,6 +371,20 @@
 /** @endcond */
 
 /**
+ * @brief The size of the send buffer to use for sockets that send sACN over multicast and unicast.
+ *
+ * This buffer size will only be used on Windows, Mac, and Linux. This isn't used for embedded platforms since their
+ * support for SO_SNDBUF is sparse and more limited.
+ *
+ * Increasing this can improve the performance of sACN sources when sending a large number of universes. The default
+ * chosen for this (115000) was determined to be sufficient to prevent the send buffer from getting full when running 1
+ * source to 100 universes at 1 unicast destination.
+ */
+#ifndef SACN_SOURCE_SOCKET_SNDBUF_SIZE
+#define SACN_SOURCE_SOCKET_SNDBUF_SIZE 115000
+#endif
+
+/**
  * @brief The maximum number of sources that can be created.
  *
  * If this is set to 0, the Source API is disabled and no memory pools are allocated for it.
@@ -382,8 +436,11 @@
  *
  * Meaningful only if #SACN_DYNAMIC_MEM is defined to 0.
  */
-#ifndef SACN_DMX_MERGER_MAX_MERGERS
+#ifdef SACN_DMX_MERGER_MAX_MERGERS
+#define SACN_DMX_MERGER_DEFAULT_MAX_MERGERS 0
+#else
 #define SACN_DMX_MERGER_MAX_MERGERS SACN_RECEIVER_MAX_UNIVERSES
+#define SACN_DMX_MERGER_DEFAULT_MAX_MERGERS 1
 #endif
 
 /**
@@ -402,6 +459,26 @@
  */
 #undef SACN_DMX_MERGER_MAX_SLOTS
 #define SACN_DMX_MERGER_MAX_SLOTS 512
+
+/**
+ * @brief Disables internal DMX merger PAP buffer for merge results.
+ *
+ * This is a memory optimization for use cases where an output pointer will always be supplied for PAP in the DMX merger
+ * configuration. Enabling this makes it required instead of optional.
+ */
+#ifndef SACN_DMX_MERGER_DISABLE_INTERNAL_PAP_BUFFER
+#define SACN_DMX_MERGER_DISABLE_INTERNAL_PAP_BUFFER 0
+#endif
+
+/**
+ * @brief Disables internal DMX merger owner buffer for merge results.
+ *
+ * This is a memory optimization for use cases where an output pointer will always be supplied for owners in the DMX
+ * merger configuration. Enabling this makes it required instead of optional.
+ */
+#ifndef SACN_DMX_MERGER_DISABLE_INTERNAL_OWNER_BUFFER
+#define SACN_DMX_MERGER_DISABLE_INTERNAL_OWNER_BUFFER 0
+#endif
 
 /**
  * @}
@@ -425,22 +502,39 @@
  *
  * Meaningful only if #SACN_DYNAMIC_MEM is defined to 0.
  */
-#ifndef SACN_MERGE_RECEIVER_ENABLE
-#define SACN_MERGE_RECEIVER_ENABLE                                                      \
+#ifndef SACN_MERGE_RECEIVER_ENABLE_IN_STATIC_MEMORY_MODE
+#define SACN_MERGE_RECEIVER_ENABLE_IN_STATIC_MEMORY_MODE                                \
   ((SACN_RECEIVER_MAX_UNIVERSES > 0) && (SACN_RECEIVER_MAX_SOURCES_PER_UNIVERSE > 0) && \
    (SACN_RECEIVER_TOTAL_MAX_SOURCES > 0) && (SACN_DMX_MERGER_MAX_MERGERS > 0) &&        \
    (SACN_DMX_MERGER_MAX_SOURCES_PER_MERGER > 0))
 #endif
 
-#if !SACN_DYNAMIC_MEM && SACN_MERGE_RECEIVER_ENABLE &&                                      \
+#if !SACN_DYNAMIC_MEM && SACN_MERGE_RECEIVER_ENABLE_IN_STATIC_MEMORY_MODE &&                \
     ((SACN_RECEIVER_MAX_UNIVERSES <= 0) || (SACN_RECEIVER_MAX_SOURCES_PER_UNIVERSE <= 0) || \
      (SACN_RECEIVER_TOTAL_MAX_SOURCES <= 0))
-#error "Error: SACN_MERGE_RECEIVER_ENABLE was set to 1, but the sACN Receiver API is disabled!"
+#error "Error: SACN_MERGE_RECEIVER_ENABLE_IN_STATIC_MEMORY_MODE was set to 1, but the sACN Receiver API is disabled!"
 #endif
 
-#if !SACN_DYNAMIC_MEM && SACN_MERGE_RECEIVER_ENABLE && \
+#if !SACN_DYNAMIC_MEM && SACN_MERGE_RECEIVER_ENABLE_IN_STATIC_MEMORY_MODE && \
     ((SACN_DMX_MERGER_MAX_MERGERS <= 0) || (SACN_DMX_MERGER_MAX_SOURCES_PER_MERGER <= 0))
-#error "Error: SACN_MERGE_RECEIVER_ENABLE was set to 1, but the sACN DMX Merger API is disabled!"
+#error "Error: SACN_MERGE_RECEIVER_ENABLE_IN_STATIC_MEMORY_MODE was set to 1, but the sACN DMX Merger API is disabled!"
+#endif
+
+/**
+ * @brief Whether to enable a second DMX merger per merge receiver dedicated to sources in the sampling period.
+ *
+ * Set this to 1 to enable, 0 to disable. This would enable existing live sources to continue being displayed during a
+ * networking reset. Disabling this would save memory by limiting to one DMX merger, but it would also interrupt all
+ * live data during the sampling period caused by a networking reset, since all sources would always be included in
+ * every sampling period.
+ */
+#ifndef SACN_MERGE_RECEIVER_ENABLE_SAMPLING_MERGER
+#define SACN_MERGE_RECEIVER_ENABLE_SAMPLING_MERGER 1
+#endif
+
+#if SACN_MERGE_RECEIVER_ENABLE_SAMPLING_MERGER && SACN_DMX_MERGER_DEFAULT_MAX_MERGERS
+#undef SACN_DMX_MERGER_MAX_MERGERS
+#define SACN_DMX_MERGER_MAX_MERGERS (SACN_RECEIVER_MAX_UNIVERSES * 2)
 #endif
 
 /**

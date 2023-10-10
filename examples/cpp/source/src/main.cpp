@@ -17,26 +17,10 @@
  * https://github.com/ETCLabs/sACN
  *****************************************************************************/
 
-#ifndef SACN_PRIVATE_NON_DMX_MEM_H_
-#define SACN_PRIVATE_NON_DMX_MEM_H_
+#include "sacn_source_example.h"
 
-#include <stddef.h>
-#include <stdint.h>
-#include "sacn/private/common.h"
-#include "sacn/private/opts.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-etcpal_error_t init_non_dmx_buf(unsigned int num_threads);
-void deinit_non_dmx_buf(void);
-
-// This is processed from the context of receiving data, so there is only one per thread.
-MergeReceiverNonDmxNotification* get_non_dmx(sacn_thread_id_t thread_id);
-
-#ifdef __cplusplus
+int main(void)
+{
+  SACNSourceExample sac_source_example;   // this class does all of the work
+  return 0;
 }
-#endif
-
-#endif /* SACN_PRIVATE_NON_DMX_MEM_H_ */

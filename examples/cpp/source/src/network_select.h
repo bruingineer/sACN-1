@@ -17,26 +17,45 @@
  * https://github.com/ETCLabs/sACN
  *****************************************************************************/
 
-#ifndef SACN_PRIVATE_MERGE_RECEIVER_SOURCE_LIMIT_EXCEEDED_MEM_H_
-#define SACN_PRIVATE_MERGE_RECEIVER_SOURCE_LIMIT_EXCEEDED_MEM_H_
+#ifndef NETWORK_SELECT_H_
+#define NETWORK_SELECT_H_
 
-#include <stddef.h>
-#include <stdint.h>
-#include "sacn/private/common.h"
-#include "sacn/private/opts.h"
+/**
+ * @file sacn/examples/cpp/source/src/network_select.h
+ * @brief Holds network interface selection information
+ */
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include <list>
+#include <memory>
+#include <vector>
+#include "etcpal/cpp/inet.h"
+#include "etcpal/netint.h"
+#include "sacn/cpp/common.h"
 
-etcpal_error_t init_merge_receiver_source_limit_exceeded_buf(unsigned int num_threads);
-void deinit_merge_receiver_source_limit_exceeded_buf(void);
 
-// This is processed from the context of receiving data, so there is only one per thread.
-MergeReceiverSourceLimitExceededNotification* get_merge_receiver_source_limit_exceeded(sacn_thread_id_t thread_id);
+class NetworkSelect
+{
+public:
+  NetworkSelect();
+  void InitializeNics(void);
+  void SelectNics(void);
+  std::vector<SacnMcastInterface> GetMcastInterfaces(void) const;
 
-#ifdef __cplusplus
-}
-#endif
+private:
+  struct EtcPalNetintInfoSelect
+  {
+    bool selected;
+    char ui_index;
+    unsigned int os_index;
+    etcpal::IpAddr addr;
+    std::string name;
+    std::string addr_string;
+  };
 
-#endif /* SACN_PRIVATE_MERGE_RECEIVER_SOURCE_LIMIT_EXCEEDED_MEM_H_ */
+  void PrintNics(void) const;
+  bool IsAnyNicSelected(void) const;
+
+  std::list<std::unique_ptr<EtcPalNetintInfoSelect>> all_network_interfaces_;
+};
+
+#endif  // NETWORK_SELECT_H_

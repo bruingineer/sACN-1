@@ -46,13 +46,13 @@ static etcpal_socket_t next_socket = (etcpal_socket_t)0;
 
 struct SubscriptionInfo
 {
-  SubscriptionInfo(etcpal_socket_t sock, uint16_t universe, const EtcPalIpAddr& ip,
+  SubscriptionInfo(const std::vector<etcpal_socket_t>& sockets, uint16_t universe, const EtcPalIpAddr& ip,
                    const std::vector<unsigned int>& netint_indexes)
-      : sock(sock), universe(universe), ip(ip), netint_indexes(netint_indexes)
+      : sockets(sockets), universe(universe), ip(ip), netint_indexes(netint_indexes)
   {
   }
 
-  etcpal_socket_t sock;
+  std::vector<etcpal_socket_t> sockets;
   uint16_t universe;
   EtcPalIpAddr ip;
   std::vector<unsigned int> netint_indexes;
@@ -61,13 +61,21 @@ struct SubscriptionInfo
 class TestSockets : public ::testing::Test
 {
 protected:
+  static void ConvertToNetintIds(const std::vector<EtcPalNetintInfo>& in, std::vector<EtcPalMcastNetintId>& out)
+  {
+    out.reserve(in.size());
+    std::transform(in.data(), in.data() + in.size(), std::back_inserter(out), [](const EtcPalNetintInfo& netint) {
+      return EtcPalMcastNetintId{netint.addr.type, netint.index};
+    });
+  }
+
   void SetUp() override
   {
     etcpal_reset_all_fakes();
     sacn_common_reset_all_fakes();
 
     // Add fake interfaces (make sure to add them in order of index)
-    if (fake_netints_.empty())
+    if (fake_netint_info_.empty())
     {
       EtcPalNetintInfo fake_netint;
 
@@ -78,7 +86,8 @@ protected:
       strcpy(fake_netint.id, "eth0");
       strcpy(fake_netint.friendly_name, "eth0");
       fake_netint.is_default = true;
-      fake_netints_.push_back(fake_netint);
+      fake_netint_info_.push_back(fake_netint);
+      fake_v4_netint_info_.push_back(fake_netint);
 
       fake_netint.index = 2;
       fake_netint.addr = etcpal::IpAddr::FromString("fe80::1234").get();
@@ -87,7 +96,8 @@ protected:
       strcpy(fake_netint.id, "eth1");
       strcpy(fake_netint.friendly_name, "eth1");
       fake_netint.is_default = false;
-      fake_netints_.push_back(fake_netint);
+      fake_netint_info_.push_back(fake_netint);
+      fake_v6_netint_info_.push_back(fake_netint);
 
       fake_netint.index = 3;
       fake_netint.addr = etcpal::IpAddr::FromString("10.101.40.50").get();
@@ -96,7 +106,8 @@ protected:
       strcpy(fake_netint.id, "eth2");
       strcpy(fake_netint.friendly_name, "eth2");
       fake_netint.is_default = false;
-      fake_netints_.push_back(fake_netint);
+      fake_netint_info_.push_back(fake_netint);
+      fake_v4_netint_info_.push_back(fake_netint);
 
       fake_netint.index = 4;
       fake_netint.addr = etcpal::IpAddr::FromString("fe80::4321").get();
@@ -105,7 +116,8 @@ protected:
       strcpy(fake_netint.id, "eth3");
       strcpy(fake_netint.friendly_name, "eth3");
       fake_netint.is_default = false;
-      fake_netints_.push_back(fake_netint);
+      fake_netint_info_.push_back(fake_netint);
+      fake_v6_netint_info_.push_back(fake_netint);
 
       fake_netint.index = 5;
       fake_netint.addr = etcpal::IpAddr::FromString("10.101.60.70").get();
@@ -114,37 +126,52 @@ protected:
       strcpy(fake_netint.id, "eth4");
       strcpy(fake_netint.friendly_name, "eth4");
       fake_netint.is_default = false;
-      fake_netints_.push_back(fake_netint);
+      fake_netint_info_.push_back(fake_netint);
+      fake_v4_netint_info_.push_back(fake_netint);
+
+      fake_netint.index = 6;
+      fake_netint.addr = etcpal::IpAddr::FromString("fe80::1122").get();
+      fake_netint.mask = etcpal::IpAddr::NetmaskV6(64).get();
+      fake_netint.mac = etcpal::MacAddr::FromString("00:c0:16:43:43:43").get();
+      strcpy(fake_netint.id, "eth5");
+      strcpy(fake_netint.friendly_name, "eth5");
+      fake_netint.is_default = false;
+      fake_netint_info_.push_back(fake_netint);
+      fake_v6_netint_info_.push_back(fake_netint);
     }
 
-    etcpal_netint_get_num_interfaces_fake.return_val = fake_netints_.size();
-    etcpal_netint_get_interfaces_fake.return_val = fake_netints_.data();
+    static auto validate_get_interfaces_args = [](EtcPalNetintInfo* netints, size_t* num_netints) {
+      if (!num_netints)
+        return kEtcPalErrInvalid;
+      if ((!netints && (*num_netints > 0)) && (netints && (*num_netints == 0)))
+        return kEtcPalErrInvalid;
+      return kEtcPalErrOk;
+    };
 
-    etcpal_netint_get_interfaces_by_index_fake.custom_fake = [](unsigned int index, const EtcPalNetintInfo** netint_arr,
-                                                                size_t* netint_arr_size) {
-      etcpal_error_t result = (netint_arr && netint_arr_size) ? kEtcPalErrOk : kEtcPalErrInvalid;
+    static auto copy_out_interfaces = [](const EtcPalNetintInfo* copy_src, size_t copy_size, EtcPalNetintInfo* netints,
+                                         size_t* num_netints) {
+      etcpal_error_t result = kEtcPalErrOk;
+
+      size_t space_available = *num_netints;
+      *num_netints = copy_size;
+
+      if (copy_size > space_available)
+      {
+        result = kEtcPalErrBufSize;
+        copy_size = space_available;
+      }
+
+      if (netints)
+        memcpy(netints, copy_src, copy_size * sizeof(EtcPalNetintInfo));
+
+      return result;
+    };
+
+    etcpal_netint_get_interfaces_fake.custom_fake = [](EtcPalNetintInfo* netints, size_t* num_netints) {
+      etcpal_error_t result = validate_get_interfaces_args(netints, num_netints);
 
       if (result == kEtcPalErrOk)
-      {
-        EtcPalNetintInfo* info = fake_netints_.data();
-        while ((info < (fake_netints_.data() + fake_netints_.size())) && (info->index != index))
-          ++info;
-
-        if (info >= (fake_netints_.data() + fake_netints_.size()))
-        {
-          result = kEtcPalErrNotFound;
-        }
-        else
-        {
-          *netint_arr = info;
-
-          size_t size = 0u;
-          while ((info < (fake_netints_.data() + fake_netints_.size())) && (info->index == index))
-            ++info, ++size;
-
-          *netint_arr_size = size;
-        }
-      }
+        result = copy_out_interfaces(fake_netint_info_.data(), fake_netint_info_.size(), netints, num_netints);
 
       return result;
     };
@@ -155,11 +182,9 @@ protected:
       return kEtcPalErrOk;
     };
 
-    fake_netint_ids_.reserve(fake_netints_.size());
-    std::transform(fake_netints_.data(), fake_netints_.data() + fake_netints_.size(),
-                   std::back_inserter(fake_netint_ids_), [](const EtcPalNetintInfo& netint) {
-                     return EtcPalMcastNetintId{netint.addr.type, netint.index};
-                   });
+    ConvertToNetintIds(fake_netint_info_, fake_netint_ids_);
+    ConvertToNetintIds(fake_v4_netint_info_, fake_v4_netint_ids_);
+    ConvertToNetintIds(fake_v6_netint_info_, fake_v6_netint_ids_);
 
     // Split the netints according to their IP type.
     for (const EtcPalMcastNetintId& fake_netint_id : fake_netint_ids_)
@@ -175,6 +200,9 @@ protected:
 
     ASSERT_EQ(sacn_receiver_mem_init(1), kEtcPalErrOk);
     ASSERT_EQ(sacn_sockets_init(nullptr), kEtcPalErrOk);
+
+    internal_sys_netints_ = sacn_sockets_get_sys_netints(kReceiver);
+    ASSERT_NE(internal_sys_netints_, nullptr);
   }
 
   void TearDown() override
@@ -183,53 +211,251 @@ protected:
     sacn_receiver_mem_deinit();
   }
 
+  etcpal_error_t AddReceiverSockets(sacn_thread_id_t thread_id, etcpal_iptype_t ip_type, uint16_t universe,
+                                    const std::vector<EtcPalMcastNetintId>& netints,
+                                    std::vector<etcpal_socket_t>& sockets)
+  {
+    etcpal_socket_t socket = ETCPAL_SOCKET_INVALID;
+    etcpal_error_t res = kEtcPalErrOk;
+
+#if SACN_RECEIVER_SOCKET_PER_NIC
+    for (const auto& netint : netints)
+    {
+      if (netint.ip_type == ip_type)
+      {
+        res = sacn_add_receiver_socket(thread_id, ip_type, universe, &netint, 1, &socket);
+        if (res == kEtcPalErrOk)
+          sockets.push_back(socket);
+        else
+          break;
+      }
+    }
+#else   // SACN_RECEIVER_SOCKET_PER_NIC
+    res = sacn_add_receiver_socket(thread_id, ip_type, universe, netints.data(), netints.size(), &socket);
+    if (res == kEtcPalErrOk)
+      sockets.push_back(socket);
+#endif  // SACN_RECEIVER_SOCKET_PER_NIC
+
+    return res;
+  }
+
+  void RemoveReceiverSockets(sacn_thread_id_t thread_id, std::vector<etcpal_socket_t>& sockets, uint16_t universe,
+                             const std::vector<EtcPalMcastNetintId>& netints,
+                             socket_cleanup_behavior_t cleanup_behavior)
+  {
+#if SACN_RECEIVER_SOCKET_PER_NIC
+    ETCPAL_UNUSED_ARG(netints);
+
+    SacnRecvThreadContext* context = get_recv_thread_context(thread_id);
+    for (auto socket : sockets)
+    {
+      int index = find_socket_ref_by_handle(context, socket);
+      ASSERT_TRUE(index >= 0);
+
+      EtcPalMcastNetintId netint;
+      netint.ip_type = context->socket_refs[index].socket.ip_type;
+      netint.index = context->socket_refs[index].socket.ifindex;
+
+      sacn_remove_receiver_socket(thread_id, &socket, universe, &netint, 1, cleanup_behavior);
+    }
+#else   // SACN_RECEIVER_SOCKET_PER_NIC
+    for (auto socket : sockets)
+      sacn_remove_receiver_socket(thread_id, &socket, universe, netints.data(), netints.size(), cleanup_behavior);
+#endif  // SACN_RECEIVER_SOCKET_PER_NIC
+  }
+
   SubscriptionInfo QueueSubscribes(sacn_thread_id_t thread_id, etcpal_iptype_t ip_type, size_t iteration)
   {
     uint16_t universe = static_cast<uint16_t>(iteration + 1u);
-    etcpal_socket_t sock{};
+    std::vector<etcpal_socket_t> sockets;
 
-    EXPECT_EQ(
-        sacn_add_receiver_socket(thread_id, ip_type, universe, fake_netint_ids_.data(), fake_netint_ids_.size(), &sock),
-        kEtcPalErrOk)
+    EXPECT_EQ(AddReceiverSockets(thread_id, ip_type, universe, fake_netint_ids_, sockets), kEtcPalErrOk)
         << "Test failed on iteration " << iteration << ".";
 
     EtcPalIpAddr ip;
     sacn_get_mcast_addr(ip_type, universe, &ip);
 
-    return SubscriptionInfo(sock, universe, ip, (ip_type == kEtcPalIpTypeV4) ? fake_v4_netints_ : fake_v6_netints_);
+    return SubscriptionInfo(sockets, universe, ip, (ip_type == kEtcPalIpTypeV4) ? fake_v4_netints_ : fake_v6_netints_);
   }
 
   void QueueUnsubscribes(sacn_thread_id_t thread_id, const SubscriptionInfo& sub)
   {
-    etcpal_socket_t sock = sub.sock;
-    sacn_remove_receiver_socket(thread_id, &sock, sub.universe, fake_netint_ids_.data(), fake_netint_ids_.size(),
-                                kQueueSocketCleanup);
+    std::vector<etcpal_socket_t> sockets = sub.sockets;
+    RemoveReceiverSockets(thread_id, sockets, sub.universe, fake_netint_ids_, kQueueSocketCleanup);
   }
 
-  void VerifyQueue(const SocketGroupReq* queue, std::vector<SubscriptionInfo> expected_subs)
+  void VerifyQueue(const SocketGroupReq* queue, const std::vector<SubscriptionInfo>& expected_subs)
   {
     size_t queue_index = 0u;
     for (const SubscriptionInfo& expected_sub : expected_subs)
     {
+      size_t socket_index = 0u;
       for (unsigned int expected_netint : expected_sub.netint_indexes)
       {
-        EXPECT_EQ(queue[queue_index].socket, expected_sub.sock) << "Test failed on queue index " << queue_index << ".";
+        EXPECT_EQ(queue[queue_index].socket, expected_sub.sockets[socket_index])
+            << "Test failed on queue index " << queue_index << ".";
         EXPECT_EQ(queue[queue_index].group.ifindex, expected_netint)
             << "Test failed on queue index " << queue_index << ".";
         EXPECT_EQ(etcpal_ip_cmp(&queue[queue_index].group.group, &expected_sub.ip), 0)
             << "Test failed on queue index " << queue_index << ".";
         ++queue_index;
+#if SACN_RECEIVER_SOCKET_PER_NIC
+        ++socket_index;
+#endif
       }
     }
   }
 
-  static std::vector<EtcPalNetintInfo> fake_netints_;
+  std::vector<SacnMcastInterface> GetFullAppNetintConfig()
+  {
+    std::vector<SacnMcastInterface> app_netint_config;
+    if (app_netint_config.empty())
+    {
+      for (const auto& sys_netint : fake_netint_info_)
+        app_netint_config.push_back({{sys_netint.addr.type, sys_netint.index}, kEtcPalErrOk});
+    }
+    return app_netint_config;
+  }
+
+  enum SamplingStatus
+  {
+    kCurrentlySampling,
+    kNotCurrentlySampling
+  };
+  void TestSamplingPeriodNetintUpdate(SacnInternalNetintArray* internal_netint_array, SamplingStatus sampling_status,
+                                      EtcPalRbTree* sampling_period_netints,
+                                      std::vector<SacnMcastInterface>& app_netint_config)
+  {
+    if (sampling_status == kNotCurrentlySampling)
+      etcpal_rbtree_clear_with_cb(sampling_period_netints, sampling_period_netint_tree_dealloc);
+
+    std::vector<SacnMcastInterface> new_netints = app_netint_config;
+    auto new_end = std::remove_if(new_netints.begin(), new_netints.end(), [&](const SacnMcastInterface& netint) {
+      bool found = false;
+      for (size_t i = 0; !found && (i < internal_netint_array->num_netints); ++i)
+        found = (netint.iface == internal_netint_array->netints[i]);
+      return found;
+    });
+    new_netints.erase(new_end, new_netints.end());
+
+    std::vector<EtcPalMcastNetintId> removed_sp_netints;
+    EtcPalRbIter iter;
+    etcpal_rbiter_init(&iter);
+    for (SacnSamplingPeriodNetint* sp_netint =
+             reinterpret_cast<SacnSamplingPeriodNetint*>(etcpal_rbiter_first(&iter, sampling_period_netints));
+         sp_netint; sp_netint = reinterpret_cast<SacnSamplingPeriodNetint*>(etcpal_rbiter_next(&iter)))
+    {
+      bool removed =
+          std::find_if(app_netint_config.begin(), app_netint_config.end(), [&](const SacnMcastInterface& app_netint) {
+            return (app_netint.iface == sp_netint->id);
+          }) == std::end(app_netint_config);
+
+      if (removed)
+        removed_sp_netints.push_back(sp_netint->id);
+    }
+
+    size_t original_sp_netints_size = etcpal_rbtree_size(sampling_period_netints);
+
+    SacnNetintConfig c_netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+    c_netint_config.netints = app_netint_config.data();
+    c_netint_config.num_netints = app_netint_config.size();
+    c_netint_config.no_netints = app_netint_config.empty();
+
+    EXPECT_EQ(sacn_initialize_receiver_netints(internal_netint_array, (sampling_status == kCurrentlySampling),
+                                               sampling_period_netints, &c_netint_config),
+              kEtcPalErrOk);
+
+    EXPECT_EQ(etcpal_rbtree_size(sampling_period_netints),
+              original_sp_netints_size + new_netints.size() - removed_sp_netints.size());
+
+    etcpal_rbiter_init(&iter);
+    for (SacnSamplingPeriodNetint* sp_netint =
+             reinterpret_cast<SacnSamplingPeriodNetint*>(etcpal_rbiter_first(&iter, sampling_period_netints));
+         sp_netint; sp_netint = reinterpret_cast<SacnSamplingPeriodNetint*>(etcpal_rbiter_next(&iter)))
+    {
+      bool found_in_app_config =
+          std::find_if(app_netint_config.begin(), app_netint_config.end(), [&](const SacnMcastInterface& app_netint) {
+            return (app_netint.iface == sp_netint->id);
+          }) != std::end(app_netint_config);
+      EXPECT_TRUE(found_in_app_config);
+
+      if (sampling_status == kCurrentlySampling)
+      {
+        bool is_new = std::find_if(new_netints.begin(), new_netints.end(), [&](const SacnMcastInterface& new_netint) {
+                        return (new_netint.iface == sp_netint->id);
+                      }) != std::end(new_netints);
+        if (is_new)
+        {
+          EXPECT_TRUE(sp_netint->in_future_sampling_period);
+        }
+      }
+      else
+      {
+        EXPECT_FALSE(sp_netint->in_future_sampling_period);
+      }
+    }
+  }
+
+  std::vector<SacnMcastInterface> GenerateDuplicateNetints(size_t num_duplicates)
+  {
+    std::vector<SacnMcastInterface> netints;
+    netints.reserve(fake_netint_info_.size() * num_duplicates);
+    for (size_t i = 0u; i < num_duplicates; ++i)
+    {
+      std::transform(fake_netint_info_.data(), fake_netint_info_.data() + fake_netint_info_.size(),
+                     std::back_inserter(netints), [](const EtcPalNetintInfo& netint) {
+                       return SacnMcastInterface{{netint.addr.type, netint.index}, kEtcPalErrNotImpl};
+                     });
+    }
+
+    return netints;
+  }
+
+  SacnInternalNetintArray InitInternalNetintArray()
+  {
+    SacnInternalNetintArray internal_netint_array;
+#if SACN_DYNAMIC_MEM
+    internal_netint_array.netints = nullptr;
+    internal_netint_array.netints_capacity = 0u;
+#endif
+    internal_netint_array.num_netints = 0u;
+
+    return internal_netint_array;
+  }
+
+  EtcPalRbTree InitSamplingPeriodNetints()
+  {
+    EtcPalRbTree sampling_period_netints;
+    etcpal_rbtree_init(&sampling_period_netints, sampling_period_netint_compare, sampling_period_netint_node_alloc,
+                       sampling_period_netint_node_dealloc);
+
+    return sampling_period_netints;
+  }
+
+  void DeinitInternalNetintArray(SacnInternalNetintArray& internal_netint_array)
+  {
+    CLEAR_BUF(&internal_netint_array, netints);
+  }
+
+  void DeinitSamplingPeriodNetints(EtcPalRbTree& sampling_period_netints)
+  {
+    etcpal_rbtree_clear_with_cb(&sampling_period_netints, sampling_period_netint_tree_dealloc);
+  }
+
+  static std::vector<EtcPalNetintInfo> fake_netint_info_;
+  static std::vector<EtcPalNetintInfo> fake_v4_netint_info_;
+  static std::vector<EtcPalNetintInfo> fake_v6_netint_info_;
   std::vector<EtcPalMcastNetintId> fake_netint_ids_;
+  std::vector<EtcPalMcastNetintId> fake_v4_netint_ids_;
+  std::vector<EtcPalMcastNetintId> fake_v6_netint_ids_;
   std::vector<unsigned int> fake_v4_netints_;
   std::vector<unsigned int> fake_v6_netints_;
+  const SacnSocketsSysNetints* internal_sys_netints_{nullptr};
 };
 
-std::vector<EtcPalNetintInfo> TestSockets::fake_netints_;
+std::vector<EtcPalNetintInfo> TestSockets::fake_netint_info_;
+std::vector<EtcPalNetintInfo> TestSockets::fake_v4_netint_info_;
+std::vector<EtcPalNetintInfo> TestSockets::fake_v6_netint_info_;
 
 TEST_F(TestSockets, SocketCleanedUpOnBindFailure)
 {
@@ -238,46 +464,66 @@ TEST_F(TestSockets, SocketCleanedUpOnBindFailure)
   unsigned int initial_socket_call_count = etcpal_socket_fake.call_count;
   unsigned int initial_close_call_count = etcpal_close_fake.call_count;
 
-  etcpal_socket_t sock;
-  EXPECT_EQ(sacn_add_receiver_socket(0, kEtcPalIpTypeV4, 1, fake_netint_ids_.data(), fake_netint_ids_.size(), &sock),
-            kEtcPalErrAddrNotAvail);
+  std::vector<etcpal_socket_t> sockets;
+  EXPECT_EQ(AddReceiverSockets(0, kEtcPalIpTypeV4, 1, fake_netint_ids_, sockets), kEtcPalErrAddrNotAvail);
   EXPECT_EQ(etcpal_socket_fake.call_count - initial_socket_call_count,
             etcpal_close_fake.call_count - initial_close_call_count);
-  EXPECT_EQ(sacn_add_receiver_socket(0, kEtcPalIpTypeV6, 1, fake_netint_ids_.data(), fake_netint_ids_.size(), &sock),
-            kEtcPalErrAddrNotAvail);
+  EXPECT_EQ(AddReceiverSockets(0, kEtcPalIpTypeV6, 1, fake_netint_ids_, sockets), kEtcPalErrAddrNotAvail);
   EXPECT_EQ(etcpal_socket_fake.call_count - initial_socket_call_count,
             etcpal_close_fake.call_count - initial_close_call_count);
 }
 
 TEST_F(TestSockets, AddReceiverSocketWorks)
 {
+  static constexpr size_t kNumIterations = 4u;
+  static constexpr size_t kNumAddsPerIteration = 2u;
+#if SACN_RECEIVER_SOCKET_PER_NIC
+  ASSERT_EQ(fake_v4_netints_.size(), fake_v6_netints_.size());
+  const size_t kNumSocketsPerAdd = fake_v4_netints_.size();
+#else
+  const size_t kNumSocketsPerAdd = 1u;
+#endif
+  const size_t kNumSocketsPerIteration = kNumSocketsPerAdd * kNumAddsPerIteration;
+  const size_t kTotalNumSockets = kNumIterations * kNumSocketsPerIteration;
+
   SacnRecvThreadContext* context = get_recv_thread_context(0);
   ASSERT_NE(context, nullptr);
   ASSERT_NE(context->socket_refs, nullptr);
 
-  etcpal_socket_t sock = ETCPAL_SOCKET_INVALID;
   uint16_t universe = 1u;
-  for (size_t i = 0u; i < 8u; i += 2u)
+  for (size_t i = 0u; i < kTotalNumSockets; i += kNumSocketsPerIteration)
   {
     for (size_t j = 0u; j < SACN_RECEIVER_MAX_SUBS_PER_SOCKET; ++j)
     {
-      EXPECT_EQ(context->num_socket_refs, j ? (i + 2u) : i);
+      EXPECT_EQ(context->num_socket_refs, j ? (i + kNumSocketsPerIteration) : i);
 
-      EXPECT_EQ(sacn_add_receiver_socket(0, kEtcPalIpTypeV4, universe, fake_netint_ids_.data(), fake_netint_ids_.size(),
-                                         &sock),
-                kEtcPalErrOk);
-      EXPECT_EQ(context->num_socket_refs, j ? (i + 2u) : (i + 1u));
-      EXPECT_EQ(context->socket_refs[i].socket.ip_type, kEtcPalIpTypeV4);
-      EXPECT_EQ(context->socket_refs[i].refcount, j + 1u);
-      EXPECT_EQ(context->socket_refs[i].socket.handle, sock);
+      std::vector<etcpal_socket_t> ipv4_sockets;
+      EXPECT_EQ(AddReceiverSockets(0, kEtcPalIpTypeV4, universe, fake_v4_netint_ids_, ipv4_sockets), kEtcPalErrOk);
+      ASSERT_EQ(ipv4_sockets.size(), kNumSocketsPerAdd);
+      EXPECT_EQ(context->num_socket_refs, j ? (i + kNumSocketsPerIteration) : (i + kNumSocketsPerAdd));
+      for (size_t k = 0u; k < kNumSocketsPerAdd; ++k)
+      {
+        EXPECT_EQ(context->socket_refs[i + k].socket.ip_type, kEtcPalIpTypeV4);
+        EXPECT_EQ(context->socket_refs[i + k].refcount, j + 1u);
+        EXPECT_EQ(context->socket_refs[i + k].socket.handle, ipv4_sockets[k]);
+#if SACN_RECEIVER_SOCKET_PER_NIC
+        EXPECT_EQ(context->socket_refs[i + k].socket.ifindex, fake_v4_netints_[k]);
+#endif
+      }
 
-      EXPECT_EQ(sacn_add_receiver_socket(0, kEtcPalIpTypeV6, universe, fake_netint_ids_.data(), fake_netint_ids_.size(),
-                                         &sock),
-                kEtcPalErrOk);
-      EXPECT_EQ(context->num_socket_refs, i + 2u);
-      EXPECT_EQ(context->socket_refs[i + 1u].socket.ip_type, kEtcPalIpTypeV6);
-      EXPECT_EQ(context->socket_refs[i + 1u].refcount, j + 1u);
-      EXPECT_EQ(context->socket_refs[i + 1u].socket.handle, sock);
+      std::vector<etcpal_socket_t> ipv6_sockets;
+      EXPECT_EQ(AddReceiverSockets(0, kEtcPalIpTypeV6, universe, fake_v6_netint_ids_, ipv6_sockets), kEtcPalErrOk);
+      ASSERT_EQ(ipv6_sockets.size(), kNumSocketsPerAdd);
+      EXPECT_EQ(context->num_socket_refs, i + (2u * kNumSocketsPerAdd));
+      for (size_t k = 0u; k < kNumSocketsPerAdd; ++k)
+      {
+        EXPECT_EQ(context->socket_refs[i + kNumSocketsPerAdd + k].socket.ip_type, kEtcPalIpTypeV6);
+        EXPECT_EQ(context->socket_refs[i + kNumSocketsPerAdd + k].refcount, j + 1u);
+        EXPECT_EQ(context->socket_refs[i + kNumSocketsPerAdd + k].socket.handle, ipv6_sockets[k]);
+#if SACN_RECEIVER_SOCKET_PER_NIC
+        EXPECT_EQ(context->socket_refs[i + kNumSocketsPerAdd + k].socket.ifindex, fake_v6_netints_[k]);
+#endif
+      }
 
       ++universe;
     }
@@ -288,65 +534,59 @@ TEST_F(TestSockets, AddReceiverSocketBindsAfterRemoveUnbinds)
 {
   static constexpr sacn_thread_id_t kThreadId = 0u;
   static constexpr uint16_t kUniverse = 1u;
+#if SACN_RECEIVER_SOCKET_PER_NIC && !SACN_RECEIVER_LIMIT_BIND
+  ASSERT_EQ(fake_v4_netint_ids_.size(), fake_v6_netint_ids_.size());
+  const unsigned int kNumBindsPerAdd = static_cast<unsigned int>(fake_v4_netint_ids_.size());
+#else
+  const unsigned int kNumBindsPerAdd = 1u;
+#endif
 
-  etcpal_socket_t sock = ETCPAL_SOCKET_INVALID;
+  std::vector<etcpal_socket_t> sockets;
   unsigned int expected_bind_count = 0u;
 
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrOk);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_v4_netint_ids_, sockets), kEtcPalErrOk);
 
-  ++expected_bind_count;
+  expected_bind_count += kNumBindsPerAdd;
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
-  sacn_remove_receiver_socket(kThreadId, &sock, kUniverse, fake_netint_ids_.data(), fake_netint_ids_.size(),
-                              kPerformAllSocketCleanupNow);
+  RemoveReceiverSockets(kThreadId, sockets, kUniverse, fake_netint_ids_, kPerformAllSocketCleanupNow);
+  sockets.clear();
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrOk);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_v4_netint_ids_, sockets), kEtcPalErrOk);
 
-  ++expected_bind_count;
+  expected_bind_count += kNumBindsPerAdd;
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
   // Also consider queued close, which in this case is considered unbinding.
-  sacn_remove_receiver_socket(kThreadId, &sock, kUniverse, fake_netint_ids_.data(), fake_netint_ids_.size(),
-                              kQueueSocketCleanup);
+  RemoveReceiverSockets(kThreadId, sockets, kUniverse, fake_netint_ids_, kQueueSocketCleanup);
+  sockets.clear();
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrOk);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_v4_netint_ids_, sockets), kEtcPalErrOk);
 
-  ++expected_bind_count;
+  expected_bind_count += kNumBindsPerAdd;
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrOk);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_v6_netint_ids_, sockets), kEtcPalErrOk);
 
-  ++expected_bind_count;
+  expected_bind_count += kNumBindsPerAdd;
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
-  sacn_remove_receiver_socket(kThreadId, &sock, kUniverse, fake_netint_ids_.data(), fake_netint_ids_.size(),
-                              kPerformAllSocketCleanupNow);
+  RemoveReceiverSockets(kThreadId, sockets, kUniverse, fake_netint_ids_, kPerformAllSocketCleanupNow);
+  sockets.clear();
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrOk);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_v6_netint_ids_, sockets), kEtcPalErrOk);
 
-  ++expected_bind_count;
+  expected_bind_count += kNumBindsPerAdd;
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
-  sacn_remove_receiver_socket(kThreadId, &sock, kUniverse, fake_netint_ids_.data(), fake_netint_ids_.size(),
-                              kQueueSocketCleanup);
+  RemoveReceiverSockets(kThreadId, sockets, kUniverse, fake_netint_ids_, kQueueSocketCleanup);
+  sockets.clear();
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrOk);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_v6_netint_ids_, sockets), kEtcPalErrOk);
 
-  ++expected_bind_count;
+  expected_bind_count += kNumBindsPerAdd;
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 }
 
@@ -354,8 +594,14 @@ TEST_F(TestSockets, AddReceiverSocketBindsAfterCreateSocketFails)
 {
   static constexpr sacn_thread_id_t kThreadId = 0u;
   static constexpr uint16_t kUniverse = 1u;
+#if SACN_RECEIVER_SOCKET_PER_NIC && !SACN_RECEIVER_LIMIT_BIND
+  ASSERT_EQ(fake_v4_netint_ids_.size(), fake_v6_netint_ids_.size());
+  const unsigned int kNumBindsPerSuccessfulAdd = static_cast<unsigned int>(fake_v4_netint_ids_.size());
+#else
+  const size_t kNumBindsPerSuccessfulAdd = 1u;
+#endif
 
-  etcpal_socket_t sock = ETCPAL_SOCKET_INVALID;
+  std::vector<etcpal_socket_t> sockets;
   unsigned int expected_bind_count = 0u;
 
   etcpal_socket_fake.custom_fake = [](unsigned int, unsigned int, etcpal_socket_t* new_sock) {
@@ -365,15 +611,11 @@ TEST_F(TestSockets, AddReceiverSocketBindsAfterCreateSocketFails)
 
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrSys);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_v4_netint_ids_, sockets), kEtcPalErrSys);
 
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrSys);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_v6_netint_ids_, sockets), kEtcPalErrSys);
 
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
@@ -384,34 +626,26 @@ TEST_F(TestSockets, AddReceiverSocketBindsAfterCreateSocketFails)
   };
   etcpal_bind_fake.return_val = kEtcPalErrSys;
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrSys);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_v4_netint_ids_, sockets), kEtcPalErrSys);
 
   ++expected_bind_count;
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrSys);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_v6_netint_ids_, sockets), kEtcPalErrSys);
 
   ++expected_bind_count;
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
   etcpal_bind_fake.return_val = kEtcPalErrOk;
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrOk);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV4, kUniverse, fake_v4_netint_ids_, sockets), kEtcPalErrOk);
 
-  ++expected_bind_count;
+  expected_bind_count += kNumBindsPerSuccessfulAdd;
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 
-  EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_netint_ids_.data(),
-                                     fake_netint_ids_.size(), &sock),
-            kEtcPalErrOk);
+  EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV6, kUniverse, fake_v6_netint_ids_, sockets), kEtcPalErrOk);
 
-  ++expected_bind_count;
+  expected_bind_count += kNumBindsPerSuccessfulAdd;
   EXPECT_EQ(etcpal_bind_fake.call_count, expected_bind_count);
 }
 
@@ -421,7 +655,9 @@ TEST_F(TestSockets, AddAndRemoveReceiverSocketBindWhenNeeded)
   static constexpr uint16_t kStartUniverse = 1u;
   static constexpr int kNumIterations = 4;
 
-  etcpal_socket_t sock[SACN_RECEIVER_MAX_SUBS_PER_SOCKET * kNumIterations * 2];
+  ASSERT_EQ(fake_v4_netint_ids_.size(), fake_v6_netint_ids_.size());
+
+  std::vector<etcpal_socket_t> sockets[SACN_RECEIVER_MAX_SUBS_PER_SOCKET * kNumIterations * 2];
   uint16_t universe = kStartUniverse;
   unsigned int expected_bind_count = 0u;
 
@@ -429,11 +665,9 @@ TEST_F(TestSockets, AddAndRemoveReceiverSocketBindWhenNeeded)
 
   for (int i = 0; i < (SACN_RECEIVER_MAX_SUBS_PER_SOCKET * kNumIterations); ++i)
   {
-    EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV4, universe, fake_netint_ids_.data(),
-                                       fake_netint_ids_.size(), &sock[i * 2]),
+    EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV4, universe, fake_v4_netint_ids_, sockets[i * 2]),
               kEtcPalErrOk);
-    EXPECT_EQ(sacn_add_receiver_socket(kThreadId, kEtcPalIpTypeV6, universe, fake_netint_ids_.data(),
-                                       fake_netint_ids_.size(), &sock[(i * 2) + 1]),
+    EXPECT_EQ(AddReceiverSockets(kThreadId, kEtcPalIpTypeV6, universe, fake_v6_netint_ids_, sockets[(i * 2) + 1]),
               kEtcPalErrOk);
 
     ++universe;
@@ -441,6 +675,9 @@ TEST_F(TestSockets, AddAndRemoveReceiverSocketBindWhenNeeded)
 
 #if SACN_RECEIVER_LIMIT_BIND
   expected_bind_count += 2;
+#elif SACN_RECEIVER_SOCKET_PER_NIC
+  ASSERT_EQ(fake_v4_netint_ids_.size(), fake_v6_netint_ids_.size());
+  expected_bind_count += (kNumIterations * 2) * static_cast<unsigned int>(fake_v4_netint_ids_.size());
 #else
   expected_bind_count += (kNumIterations * 2);
 #endif
@@ -452,12 +689,12 @@ TEST_F(TestSockets, AddAndRemoveReceiverSocketBindWhenNeeded)
   {
     for (int j = 0; j < SACN_RECEIVER_MAX_SUBS_PER_SOCKET; ++j)
     {
-      int ipv4_socket_index = ((SACN_RECEIVER_MAX_SUBS_PER_SOCKET * i) + j) * 2;
-      int ipv6_socket_index = (((SACN_RECEIVER_MAX_SUBS_PER_SOCKET * i) + j) * 2) + 1;
-      sacn_remove_receiver_socket(kThreadId, &sock[ipv4_socket_index], universe, fake_netint_ids_.data(),
-                                  fake_netint_ids_.size(), kPerformAllSocketCleanupNow);
-      sacn_remove_receiver_socket(kThreadId, &sock[ipv6_socket_index], universe, fake_netint_ids_.data(),
-                                  fake_netint_ids_.size(), kPerformAllSocketCleanupNow);
+      int ipv4_sockets_index = ((SACN_RECEIVER_MAX_SUBS_PER_SOCKET * i) + j) * 2;
+      int ipv6_sockets_index = (((SACN_RECEIVER_MAX_SUBS_PER_SOCKET * i) + j) * 2) + 1;
+      RemoveReceiverSockets(kThreadId, sockets[ipv4_sockets_index], universe, fake_v4_netint_ids_,
+                            kPerformAllSocketCleanupNow);
+      RemoveReceiverSockets(kThreadId, sockets[ipv6_sockets_index], universe, fake_v6_netint_ids_,
+                            kPerformAllSocketCleanupNow);
 
       ++universe;
     }
@@ -561,8 +798,16 @@ TEST_F(TestSockets, InitializeInternalNetintsWorks)
 #endif
   internal_netint_array.num_netints = 0u;
 
-  SacnNetintConfig app_netint_config = {app_netints.data(), app_netints.size()};
-  sacn_initialize_internal_netints(&internal_netint_array, &app_netint_config, sys_netints.data(), sys_netints.size());
+  SacnNetintConfig app_netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+  app_netint_config.netints = app_netints.data();
+  app_netint_config.num_netints = app_netints.size();
+
+  size_t num_valid_netints = 0u;
+  ASSERT_EQ(sacn_validate_netint_config(&app_netint_config, sys_netints.data(), sys_netints.size(), &num_valid_netints),
+            kEtcPalErrOk);
+  EXPECT_EQ(sacn_initialize_internal_netints(&internal_netint_array, &app_netint_config, num_valid_netints,
+                                             sys_netints.data(), sys_netints.size()),
+            kEtcPalErrOk);
 
   for (size_t i = 0u; i < app_netints.size(); ++i)
     EXPECT_EQ(app_netints[i].status, expected_statuses[i]);
@@ -576,6 +821,102 @@ TEST_F(TestSockets, InitializeInternalNetintsWorks)
   }
 
   CLEAR_BUF(&internal_netint_array, netints);
+
+  // Test "no interfaces" as well
+  app_netint_config.netints = nullptr;
+  app_netint_config.num_netints = 0u;
+  app_netint_config.no_netints = true;
+
+  ASSERT_EQ(sacn_validate_netint_config(&app_netint_config, sys_netints.data(), sys_netints.size(), &num_valid_netints),
+            kEtcPalErrOk);
+  EXPECT_EQ(sacn_initialize_internal_netints(&internal_netint_array, &app_netint_config, num_valid_netints,
+                                             sys_netints.data(), sys_netints.size()),
+            kEtcPalErrOk);
+
+  EXPECT_EQ(num_valid_netints, 0u);
+  EXPECT_EQ(internal_netint_array.num_netints, 0u);
+
+  CLEAR_BUF(&internal_netint_array, netints);
+}
+
+TEST_F(TestSockets, SamplingPeriodNetintsUpdateCorrectly)
+{
+  SacnInternalNetintArray internal_netint_array = InitInternalNetintArray();
+  EtcPalRbTree sampling_period_netints = InitSamplingPeriodNetints();
+
+  std::vector<SacnMcastInterface> full_config = GetFullAppNetintConfig();
+  std::vector<SacnMcastInterface> config_1 = {full_config.begin(), full_config.end() - (full_config.size() / 2)};
+  std::vector<SacnMcastInterface> config_2 = full_config;
+  std::vector<SacnMcastInterface> config_3 = {full_config.begin() + (full_config.size() / 2), full_config.end()};
+  std::vector<SacnMcastInterface> empty_config = {};  // TestSamplingPeriodNetintUpdate treats empty as "no interfaces"
+
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kNotCurrentlySampling, &sampling_period_netints, empty_config);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kNotCurrentlySampling, &sampling_period_netints, config_1);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kNotCurrentlySampling, &sampling_period_netints, config_2);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kNotCurrentlySampling, &sampling_period_netints, config_3);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kNotCurrentlySampling, &sampling_period_netints, config_2);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kNotCurrentlySampling, &sampling_period_netints, config_1);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kNotCurrentlySampling, &sampling_period_netints, config_3);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kNotCurrentlySampling, &sampling_period_netints, config_1);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kNotCurrentlySampling, &sampling_period_netints, empty_config);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kCurrentlySampling, &sampling_period_netints, empty_config);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kCurrentlySampling, &sampling_period_netints, config_1);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kCurrentlySampling, &sampling_period_netints, config_2);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kCurrentlySampling, &sampling_period_netints, config_3);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kCurrentlySampling, &sampling_period_netints, config_2);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kCurrentlySampling, &sampling_period_netints, config_1);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kCurrentlySampling, &sampling_period_netints, config_3);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kCurrentlySampling, &sampling_period_netints, config_1);
+  TestSamplingPeriodNetintUpdate(&internal_netint_array, kCurrentlySampling, &sampling_period_netints, empty_config);
+
+  DeinitInternalNetintArray(internal_netint_array);
+  DeinitSamplingPeriodNetints(sampling_period_netints);
+}
+
+TEST_F(TestSockets, AddAllNetintsToSamplingPeriodWorks)
+{
+  std::vector<SacnMcastInterface> sys_netints = {
+      {{kEtcPalIpTypeV4, 1u}, kEtcPalErrOk}, {{kEtcPalIpTypeV6, 2u}, kEtcPalErrOk},
+      {{kEtcPalIpTypeV4, 3u}, kEtcPalErrOk}, {{kEtcPalIpTypeV6, 4u}, kEtcPalErrOk},
+      {{kEtcPalIpTypeV4, 5u}, kEtcPalErrOk}, {{kEtcPalIpTypeV6, 6u}, kEtcPalErrOk}};
+
+  SacnInternalNetintArray internal_netint_array = InitInternalNetintArray();
+
+  SacnNetintConfig app_netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+
+  size_t num_valid_netints = 0u;
+  ASSERT_EQ(sacn_validate_netint_config(&app_netint_config, sys_netints.data(), sys_netints.size(), &num_valid_netints),
+            kEtcPalErrOk);
+  ASSERT_EQ(sacn_initialize_internal_netints(&internal_netint_array, &app_netint_config, num_valid_netints,
+                                             sys_netints.data(), sys_netints.size()),
+            kEtcPalErrOk);
+
+  EtcPalRbTree sampling_period_netints = InitSamplingPeriodNetints();
+  EXPECT_EQ(add_sacn_sampling_period_netint(&sampling_period_netints, &sys_netints[0].iface, false), kEtcPalErrOk);
+  EXPECT_EQ(add_sacn_sampling_period_netint(&sampling_period_netints, &sys_netints[1].iface, true), kEtcPalErrOk);
+
+  EXPECT_EQ(sacn_add_all_netints_to_sampling_period(&internal_netint_array, &sampling_period_netints), kEtcPalErrOk);
+
+  EXPECT_EQ(etcpal_rbtree_size(&sampling_period_netints), sys_netints.size());
+
+  int sys_netints_index = 0;
+  EtcPalRbIter iter;
+  etcpal_rbiter_init(&iter);
+  for (SacnSamplingPeriodNetint* sp_netint =
+           reinterpret_cast<SacnSamplingPeriodNetint*>(etcpal_rbiter_first(&iter, &sampling_period_netints));
+       sp_netint; sp_netint = reinterpret_cast<SacnSamplingPeriodNetint*>(etcpal_rbiter_next(&iter)))
+  {
+    auto new_end = std::remove_if(sys_netints.begin(), sys_netints.end(),
+                                  [&](const SacnMcastInterface& netint) { return netint.iface == sp_netint->id; });
+    EXPECT_NE(new_end, sys_netints.end());  // Verify each sp_netint lines up with exactly one sys_netint
+    EXPECT_FALSE(sp_netint->in_future_sampling_period);
+
+    sys_netints.erase(new_end, sys_netints.end());
+    ++sys_netints_index;
+  }
+
+  DeinitInternalNetintArray(internal_netint_array);
+  DeinitSamplingPeriodNetints(sampling_period_netints);
 }
 
 TEST_F(TestSockets, SendTransmitsMinimumLength)
@@ -594,34 +935,35 @@ TEST_F(TestSockets, SendTransmitsMinimumLength)
 
   EXPECT_EQ(etcpal_sendto_fake.call_count, 0u);
 
-  sacn_send_multicast(kTestUniverseId, kSacnIpV4AndIpV6, send_buf, &fake_netint_ids_[0]);
-  sacn_send_unicast(kSacnIpV4AndIpV6, send_buf, &kTestAddr);
+  etcpal_error_t tmp_err = kEtcPalErrOk;
+  EXPECT_EQ(sacn_send_multicast(kTestUniverseId, kSacnIpV4AndIpV6, send_buf, &fake_netint_ids_[0]), kEtcPalErrOk);
+  EXPECT_EQ(sacn_send_unicast(kSacnIpV4AndIpV6, send_buf, &kTestAddr, &tmp_err), kEtcPalErrOk);
 
-  EXPECT_EQ(etcpal_sendto_fake.call_count, 3u);
+  EXPECT_EQ(etcpal_sendto_fake.call_count, 2u);
 }
 
-TEST_F(TestSockets, InitAndResetHandleCustomSysNetints)
+// Init has already been called with nullptr. Verify that it has initialized all sys netints.
+TEST_F(TestSockets, InitStartsOnAllNetints)
 {
-  const SacnSocketsSysNetints* internal_sys_netints = sacn_sockets_get_sys_netints(kReceiver);
-  ASSERT_NE(internal_sys_netints, nullptr);
-
-  // This starts with init having already been called with nullptr (using all sys netints). Verify that.
-  ASSERT_EQ(internal_sys_netints->num_sys_netints, fake_netints_.size());
-  for (size_t i = 0u; i < internal_sys_netints->num_sys_netints; ++i)
+  ASSERT_EQ(internal_sys_netints_->num_sys_netints, fake_netint_info_.size());
+  for (size_t i = 0u; i < internal_sys_netints_->num_sys_netints; ++i)
   {
-    EXPECT_EQ(internal_sys_netints->sys_netints[i].iface.index, fake_netints_[i].index)
+    EXPECT_EQ(internal_sys_netints_->sys_netints[i].iface.index, fake_netint_info_[i].index)
         << "Test failed on iteration " << i << ".";
-    EXPECT_EQ(internal_sys_netints->sys_netints[i].iface.ip_type, fake_netints_[i].addr.type)
+    EXPECT_EQ(internal_sys_netints_->sys_netints[i].iface.ip_type, fake_netint_info_[i].addr.type)
         << "Test failed on iteration " << i << ".";
-    EXPECT_EQ(internal_sys_netints->sys_netints[i].status, kEtcPalErrOk) << "Test failed on iteration " << i << ".";
+    EXPECT_EQ(internal_sys_netints_->sys_netints[i].status, kEtcPalErrOk) << "Test failed on iteration " << i << ".";
   }
+}
 
-  // Now test reset with custom sys netints (just use the receiver variant)
-  // (this also verifies init since it's the same underlying function)
+// Now test reset with custom sys netints (just use the receiver variant)
+// (this also verifies init since it's the same underlying function)
+TEST_F(TestSockets, ResetHandlesCustomNetints)
+{
   std::vector<SacnMcastInterface> sys_netints;
-  sys_netints.reserve(fake_netints_.size());
-  std::transform(fake_netints_.data(), fake_netints_.data() + fake_netints_.size(), std::back_inserter(sys_netints),
-                 [](const EtcPalNetintInfo& netint) {
+  sys_netints.reserve(fake_netint_info_.size());
+  std::transform(fake_netint_info_.data(), fake_netint_info_.data() + fake_netint_info_.size(),
+                 std::back_inserter(sys_netints), [](const EtcPalNetintInfo& netint) {
                    return SacnMcastInterface{{netint.addr.type, netint.index}, kEtcPalErrNotImpl};
                  });
 
@@ -633,21 +975,25 @@ TEST_F(TestSockets, InitAndResetHandleCustomSysNetints)
 
   for (size_t num_sys_netints = sys_netints.size(); num_sys_netints >= 1u; --num_sys_netints)
   {
-    SacnNetintConfig sys_netint_config = {sys_netints.data(), num_sys_netints};
+    SacnNetintConfig sys_netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+    sys_netint_config.netints = sys_netints.data();
+    sys_netint_config.num_netints = num_sys_netints;
+
     EXPECT_EQ(sacn_sockets_reset_receiver(&sys_netint_config), kEtcPalErrOk);
 
-    size_t num_valid_netints = (num_sys_netints > fake_netints_.size()) ? fake_netints_.size() : num_sys_netints;
+    size_t num_valid_netints =
+        (num_sys_netints > fake_netint_info_.size()) ? fake_netint_info_.size() : num_sys_netints;
     size_t num_invalid_netints =
-        (num_sys_netints > fake_netints_.size()) ? (num_sys_netints - fake_netints_.size()) : 0u;
+        (num_sys_netints > fake_netint_info_.size()) ? (num_sys_netints - fake_netint_info_.size()) : 0u;
 
-    ASSERT_EQ(internal_sys_netints->num_sys_netints, num_valid_netints);
+    ASSERT_EQ(internal_sys_netints_->num_sys_netints, num_valid_netints);
     for (size_t i = 0u; i < num_valid_netints; ++i)
     {
-      EXPECT_EQ(internal_sys_netints->sys_netints[i].iface.index, sys_netints[i].iface.index)
+      EXPECT_EQ(internal_sys_netints_->sys_netints[i].iface.index, sys_netints[i].iface.index)
           << "Test failed on iteration " << i << " when testing " << num_sys_netints << " netints.";
-      EXPECT_EQ(internal_sys_netints->sys_netints[i].iface.ip_type, sys_netints[i].iface.ip_type)
+      EXPECT_EQ(internal_sys_netints_->sys_netints[i].iface.ip_type, sys_netints[i].iface.ip_type)
           << "Test failed on iteration " << i << " when testing " << num_sys_netints << " netints.";
-      EXPECT_EQ(internal_sys_netints->sys_netints[i].status, kEtcPalErrOk)
+      EXPECT_EQ(internal_sys_netints_->sys_netints[i].status, kEtcPalErrOk)
           << "Test failed on iteration " << i << " when testing " << num_sys_netints << " netints.";
       EXPECT_EQ(sys_netints[i].status, kEtcPalErrOk)
           << "Test failed on iteration " << i << " when testing " << num_sys_netints << " netints.";
@@ -659,16 +1005,100 @@ TEST_F(TestSockets, InitAndResetHandleCustomSysNetints)
           << "Test failed on iteration " << i << " when testing " << num_sys_netints << " netints.";
     }
   }
+}
 
-  // Now return to the nullptr (all sys netints) case
-  EXPECT_EQ(sacn_sockets_reset_receiver(nullptr), kEtcPalErrOk);
-  ASSERT_EQ(internal_sys_netints->num_sys_netints, fake_netints_.size());
-  for (size_t i = 0u; i < internal_sys_netints->num_sys_netints; ++i)
+// Test the "no interfaces" case
+TEST_F(TestSockets, ResetHandlesNoNetints)
+{
+  SacnNetintConfig sys_netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+  sys_netint_config.no_netints = true;
+
+  EXPECT_EQ(sacn_sockets_reset_receiver(&sys_netint_config), kEtcPalErrOk);
+
+  EXPECT_EQ(internal_sys_netints_->num_sys_netints, 0u);
+}
+
+// Test duplicate interfaces
+TEST_F(TestSockets, ResetHandlesDuplicateNetints)
+{
+  static constexpr size_t kNumDuplicates = 3u;
+  std::vector<SacnMcastInterface> sys_netints = GenerateDuplicateNetints(kNumDuplicates);
+
+  SacnNetintConfig sys_netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+  sys_netint_config.netints = sys_netints.data();
+  sys_netint_config.num_netints = sys_netints.size();
+
+  EXPECT_EQ(sacn_sockets_reset_receiver(&sys_netint_config), kEtcPalErrOk);
+
+  ASSERT_EQ(internal_sys_netints_->num_sys_netints, fake_netint_info_.size());
+  for (size_t i = 0u; i < internal_sys_netints_->num_sys_netints; ++i)
   {
-    EXPECT_EQ(internal_sys_netints->sys_netints[i].iface.index, fake_netints_[i].index)
+    EXPECT_EQ(internal_sys_netints_->sys_netints[i].iface.index, fake_netint_info_[i].index)
         << "Test failed on iteration " << i << ".";
-    EXPECT_EQ(internal_sys_netints->sys_netints[i].iface.ip_type, fake_netints_[i].addr.type)
+    EXPECT_EQ(internal_sys_netints_->sys_netints[i].iface.ip_type, fake_netint_info_[i].addr.type)
         << "Test failed on iteration " << i << ".";
-    EXPECT_EQ(internal_sys_netints->sys_netints[i].status, kEtcPalErrOk) << "Test failed on iteration " << i << ".";
   }
+
+  for (size_t i = 0u; i < sys_netints.size(); ++i)
+    EXPECT_EQ(sys_netints[i].status, kEtcPalErrOk) << "Test failed on iteration " << i << ".";
+}
+
+// Now return to the nullptr (all sys netints) case
+TEST_F(TestSockets, ResetHandlesAllNetints)
+{
+  EXPECT_EQ(sacn_sockets_reset_receiver(nullptr), kEtcPalErrOk);
+  ASSERT_EQ(internal_sys_netints_->num_sys_netints, fake_netint_info_.size());
+  for (size_t i = 0u; i < internal_sys_netints_->num_sys_netints; ++i)
+  {
+    EXPECT_EQ(internal_sys_netints_->sys_netints[i].iface.index, fake_netint_info_[i].index)
+        << "Test failed on iteration " << i << ".";
+    EXPECT_EQ(internal_sys_netints_->sys_netints[i].iface.ip_type, fake_netint_info_[i].addr.type)
+        << "Test failed on iteration " << i << ".";
+    EXPECT_EQ(internal_sys_netints_->sys_netints[i].status, kEtcPalErrOk) << "Test failed on iteration " << i << ".";
+  }
+}
+
+TEST_F(TestSockets, InitNetintsHandlesDuplicates)
+{
+  static constexpr size_t kNumDuplicates = 3u;
+  std::vector<SacnMcastInterface> app_netints = GenerateDuplicateNetints(kNumDuplicates);
+
+  SacnNetintConfig c_netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+  c_netint_config.netints = app_netints.data();
+  c_netint_config.num_netints = app_netints.size();
+
+  SacnInternalNetintArray internal_netint_array = InitInternalNetintArray();
+  EtcPalRbTree sampling_period_netints = InitSamplingPeriodNetints();
+
+  EXPECT_EQ(sacn_initialize_receiver_netints(&internal_netint_array, false, &sampling_period_netints, &c_netint_config),
+            kEtcPalErrOk);
+
+  for (size_t i = 0u; i < app_netints.size(); ++i)
+    EXPECT_EQ(app_netints[i].status, kEtcPalErrOk) << "Test failed on iteration " << i << ".";
+
+  ASSERT_EQ(internal_netint_array.num_netints, fake_netint_info_.size());
+  for (size_t i = 0u; i < fake_netint_info_.size(); ++i)
+  {
+    EXPECT_EQ(internal_netint_array.netints[i].index, fake_netint_info_[i].index)
+        << "Test failed on iteration " << i << ".";
+    EXPECT_EQ(internal_netint_array.netints[i].ip_type, fake_netint_info_[i].addr.type)
+        << "Test failed on iteration " << i << ".";
+  }
+
+  EXPECT_EQ(etcpal_rbtree_size(&sampling_period_netints), fake_netint_info_.size());
+  EtcPalRbIter iter;
+  etcpal_rbiter_init(&iter);
+  for (SacnSamplingPeriodNetint* sp_netint =
+           reinterpret_cast<SacnSamplingPeriodNetint*>(etcpal_rbiter_first(&iter, &sampling_period_netints));
+       sp_netint; sp_netint = reinterpret_cast<SacnSamplingPeriodNetint*>(etcpal_rbiter_next(&iter)))
+  {
+    bool found_in_fake_netints =
+        std::find_if(fake_netint_info_.begin(), fake_netint_info_.end(), [&](const EtcPalNetintInfo& fake_netint) {
+          return (fake_netint.index == sp_netint->id.index) && (fake_netint.addr.type == sp_netint->id.ip_type);
+        }) != std::end(fake_netint_info_);
+    EXPECT_TRUE(found_in_fake_netints);
+  }
+
+  DeinitInternalNetintArray(internal_netint_array);
+  DeinitSamplingPeriodNetints(sampling_period_netints);
 }

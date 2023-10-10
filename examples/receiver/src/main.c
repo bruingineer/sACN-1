@@ -74,7 +74,7 @@ typedef struct ListeningUniverse
 
 ListeningUniverse listeners[MAX_LISTENERS];
 
-etcpal_mutex_t mutex;
+etcpal_mutex_t state_lock;
 
 /**************************************************************************************************
  * Local Functions
@@ -151,6 +151,8 @@ static ListeningUniverse* find_listener_on_universe(uint16_t universe)
 static etcpal_error_t create_listener(ListeningUniverse* listener, uint16_t universe,
                                       const SacnReceiverCallbacks* callbacks)
 {
+  etcpal_error_t result = kEtcPalErrOk;
+
   SacnReceiverConfig config = SACN_RECEIVER_CONFIG_DEFAULT_INIT;
   config.callbacks = *callbacks;
   config.callbacks.context = listener;
@@ -158,33 +160,58 @@ static etcpal_error_t create_listener(ListeningUniverse* listener, uint16_t univ
 
   printf("Creating a new sACN receiver on universe %u.\n", universe);
 
-  // Normally passing in NULL and 0 for netints and length would achieve the same result, this is just for
-  // demonstration.
-  size_t num_sys_netints = etcpal_netint_get_num_interfaces();
-  const EtcPalNetintInfo* netint_list = etcpal_netint_get_interfaces();
-#define MAX_LISTENER_NETINTS 100
-  SacnMcastInterface netints[MAX_LISTENER_NETINTS];
+  // Even though reset_networking is never called in this example, a loop is used to demonstrate the case where it could
+  // be called at any time on another thread.
+  size_t num_sys_netints = 4;  // Start with estimate which eventually has the actual number written to it
+  EtcPalNetintInfo* netint_list = calloc(num_sys_netints, sizeof(EtcPalNetintInfo));
+  if (!netint_list)
+    result = kEtcPalErrNoMem;
 
-  for (size_t i = 0; (i < num_sys_netints) && (i < MAX_LISTENER_NETINTS); ++i)
+  if (result == kEtcPalErrOk)
   {
-    netints[i].iface.index = netint_list[i].index;
-    netints[i].iface.ip_type = netint_list[i].addr.type;
+    do
+    {
+      result = etcpal_netint_get_interfaces(netint_list, &num_sys_netints);
+      if (result == kEtcPalErrBufSize)
+      {
+        EtcPalNetintInfo* new_netint_list = realloc(netint_list, num_sys_netints * sizeof(EtcPalNetintInfo));
+        if (new_netint_list)
+          netint_list = new_netint_list;
+        else
+          result = kEtcPalErrNoMem;
+      }
+    } while (result == kEtcPalErrBufSize);
   }
 
-  SacnNetintConfig netint_config;
-  netint_config.netints = netints;
-  netint_config.num_netints = (num_sys_netints < MAX_LISTENER_NETINTS) ? num_sys_netints : MAX_LISTENER_NETINTS;
+  if (result == kEtcPalErrOk)
+  {
+#define MAX_LISTENER_NETINTS 100
+    SacnMcastInterface netints[MAX_LISTENER_NETINTS];
 
-  etcpal_error_t result = sacn_receiver_create(&config, &listener->receiver_handle, &netint_config);
+    for (size_t i = 0; (i < num_sys_netints) && (i < MAX_LISTENER_NETINTS); ++i)
+    {
+      netints[i].iface.index = netint_list[i].index;
+      netints[i].iface.ip_type = netint_list[i].addr.type;
+    }
+
+    SacnNetintConfig netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
+    netint_config.netints = netints;
+    netint_config.num_netints = (num_sys_netints < MAX_LISTENER_NETINTS) ? num_sys_netints : MAX_LISTENER_NETINTS;
+
+    result = sacn_receiver_create(&config, &listener->receiver_handle, &netint_config);
+  }
+
   if (result == kEtcPalErrOk)
   {
     listener->universe = universe;
     listener->num_sources = 0;
   }
-  else
-  {
+
+  if (result != kEtcPalErrOk)
     printf("Creating sACN receiver failed with error: '%s'\n", etcpal_strerror(result));
-  }
+
+  if (netint_list)
+    free(netint_list);
 
   return result;
 }
@@ -267,7 +294,7 @@ static void console_print_help()
 /* Print a status update for each listening universe about the status of its sources. */
 static void console_print_universe_updates()
 {
-  if (etcpal_mutex_lock(&mutex))
+  if (etcpal_mutex_lock(&state_lock))
   {
     printf(BEGIN_BORDER_STRING);
     for (ListeningUniverse* listener = listeners; listener < listeners + MAX_LISTENERS; ++listener)
@@ -298,7 +325,7 @@ static void console_print_universe_updates()
       }
     }
     printf(END_BORDER_STRING);
-    etcpal_mutex_unlock(&mutex);
+    etcpal_mutex_unlock(&state_lock);
   }
 }
 
@@ -396,7 +423,7 @@ static void handle_universe_data(sacn_receiver_t receiver_handle, const EtcPalSo
   ETCPAL_UNUSED_ARG(receiver_handle);
   ETCPAL_UNUSED_ARG(source_addr);
 
-  if (etcpal_mutex_lock(&mutex))
+  if (etcpal_mutex_lock(&state_lock))
   {
     ListeningUniverse* listener = (ListeningUniverse*)context;
     assert(listener);
@@ -433,7 +460,7 @@ static void handle_universe_data(sacn_receiver_t receiver_handle, const EtcPalSo
       memset(source->last_update + values_len, 0, NUM_SLOTS_DISPLAYED - values_len);
     }
 
-    etcpal_mutex_unlock(&mutex);
+    etcpal_mutex_unlock(&state_lock);
   }
 }
 
@@ -447,7 +474,7 @@ static void handle_sources_lost(sacn_receiver_t handle, uint16_t universe, const
 {
   ETCPAL_UNUSED_ARG(handle);
 
-  if (etcpal_mutex_lock(&mutex))
+  if (etcpal_mutex_lock(&state_lock))
   {
     ListeningUniverse* listener = (ListeningUniverse*)context;
     assert(listener);
@@ -466,7 +493,7 @@ static void handle_sources_lost(sacn_receiver_t handle, uint16_t universe, const
         --listener->num_sources;
       }
     }
-    etcpal_mutex_unlock(&mutex);
+    etcpal_mutex_unlock(&state_lock);
   }
 }
 
@@ -550,7 +577,7 @@ extern void install_keyboard_interrupt_handler(void (*handler)());
 
 int main(void)
 {
-  if (!etcpal_mutex_create(&mutex))
+  if (!etcpal_mutex_create(&state_lock))
   {
     printf("Couldn't create mutex!\n");
     return 1;
@@ -639,6 +666,6 @@ int main(void)
   }
 
   sacn_deinit();
-  etcpal_mutex_destroy(&mutex);
+  etcpal_mutex_destroy(&state_lock);
   return 0;
 }

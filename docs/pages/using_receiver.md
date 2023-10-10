@@ -42,7 +42,7 @@ config.callbacks.source_limit_exceeded = my_source_limit_exceeded_callback; // o
 SacnMcastInterface my_netints[NUM_MY_NETINTS];
 // Assuming my_netints and NUM_MY_NETINTS are initialized by the application...
 
-SacnNetintConfig netint_config;
+SacnNetintConfig netint_config = SACN_NETINT_CONFIG_DEFAULT_INIT;
 netint_config.netints = my_netints;
 netint_config.num_netints = NUM_MY_NETINTS;
 
@@ -63,15 +63,15 @@ sacn_receiver_destroy(my_receiver_handle);
 class MyNotifyHandler : public sacn::Receiver::NotifyHandler
 {
   // Required callbacks that must be implemented:
-  void HandleUniverseData(Handle receiver_handle, const etcpal::SockAddr& source_addr,
+  void HandleUniverseData(sacn::Receiver::Handle receiver_handle, const etcpal::SockAddr& source_addr,
                           const SacnRemoteSource& source_info, const SacnRecvUniverseData& universe_data) override;
-  void HandleSourcesLost(Handle handle, uint16_t universe, const std::vector<SacnLostSource>& lost_sources) override;
+  void HandleSourcesLost(sacn::Receiver::Handle handle, uint16_t universe, const std::vector<SacnLostSource>& lost_sources) override;
 
   // Optional callbacks - these don't have to be a part of MyNotifyHandler:
-  void HandleSamplingPeriodStarted(Handle handle, uint16_t universe) override;
-  void HandleSamplingPeriodEnded(Handle handle, uint16_t universe) override;
-  void HandleSourcePapLost(Handle handle, uint16_t universe, const SacnRemoteSource& source) override;
-  void HandleSourceLimitExceeded(Handle handle, uint16_t universe) override;
+  void HandleSamplingPeriodStarted(sacn::Receiver::Handle handle, uint16_t universe) override;
+  void HandleSamplingPeriodEnded(sacn::Receiver::Handle handle, uint16_t universe) override;
+  void HandleSourcePapLost(sacn::Receiver::Handle handle, uint16_t universe, const SacnRemoteSource& source) override;
+  void HandleSourceLimitExceeded(sacn::Receiver::Handle handle, uint16_t universe) override;
 };
 
 // Now to set up a receiver:
@@ -195,7 +195,7 @@ void my_universe_data_callback(sacn_receiver_t receiver_handle, const EtcPalSock
          universe_data->start_code);
 
   if (universe_data->is_sampling)
-    printf(" (during the sampling period)\n");
+    printf(" (this source is currently part of a sampling period)\n");
   else
     printf("\n");
 
@@ -211,7 +211,7 @@ void my_universe_data_callback(sacn_receiver_t receiver_handle, const EtcPalSock
 ```
 <!-- CODE_BLOCK_MID -->
 ```cpp
-void MyNotifyHandler::HandleUniverseData(Handle receiver_handle, const etcpal::SockAddr& source_addr,
+void MyNotifyHandler::HandleUniverseData(sacn::Receiver::Handle receiver_handle, const etcpal::SockAddr& source_addr,
                                          const SacnRemoteSource& source_info, const SacnRecvUniverseData& universe_data)
 {
   // You wouldn't normally print a message on each sACN update, but this is just to demonstrate the
@@ -222,7 +222,7 @@ void MyNotifyHandler::HandleUniverseData(Handle receiver_handle, const etcpal::S
             << universe_data.start_code;
 
   if (universe_data.is_sampling)
-    std::cout << " (during the sampling period)\n";
+    std::cout << " (this source is currently part of a sampling period)\n";
   else
     std::cout << "\n";
 
@@ -240,17 +240,22 @@ void MyNotifyHandler::HandleUniverseData(Handle receiver_handle, const etcpal::S
 
 ## The Sampling period
 
-There may be multiple sources transmitting data on a universe. The sampling period is used in order
-to remove flicker as sources are discoverd. There are notifications for when the sampling period
-begins, as well as when it ends, for each universe. The Universe Data callback also provides
-is_sampling (in universe_data) to indicate if the data was received during the sampling period.
-These notifications allow the application to know when to act on the universe data with assurance
-that all of the current sources are represented.
+There may be multiple sources transmitting data on a universe. Sampling periods are used in order
+to remove flicker as sources are discovered on a new network. The sampling period occurs when a new
+receiver is created, as well as when the universe and/or footprint are changed, or after a
+networking reset. There are notifications for when the sampling period begins, as well as when it
+ends, for each receiver. The universe data callback also provides is_sampling (in universe_data) to
+indicate if the data was received from a source that's currently part of a sampling period. These
+notifications allow the application to know when to act on the universe data with assurance that
+all of the current sources on the current network(s) are represented.
 
-The sampling period occurs when a new receiver is created, as well as when the universe and/or
-footprint are changed.
+Some sources might not be part of a sampling period while it occurs - for example, only new network
+interfaces will be part of the sampling period resulting from a networking reset. In this case, the
+application can continue to act on the universe data for the current network(s) while the new
+network(s) are in the sampling period (again by referring to the is_sampling flag in the universe
+data callback).
 
-Here is an example of the Sampling Period Ended callback:
+Here is an example of the sampling period ended callback:
 
 <!-- CODE_BLOCK_START -->
 ```c
@@ -263,7 +268,7 @@ void my_sampling_period_ended_callback(sacn_receiver_t handle, uint16_t universe
 ```
 <!-- CODE_BLOCK_MID -->
 ```cpp
-void MyNotifyHandler::HandleSamplingPeriodEnded(Handle handle, uint16_t universe)
+void MyNotifyHandler::HandleSamplingPeriodEnded(sacn::Receiver::Handle handle, uint16_t universe)
 {
   // Apply universe data as needed...
 }
@@ -318,7 +323,7 @@ void my_source_pap_lost_callback(sacn_receiver_t handle, uint16_t universe, cons
 ```
 <!-- CODE_BLOCK_MID -->
 ```cpp
-void MyNotifyHandler::HandleSourcePapLost(Handle handle, uint16_t universe, const SacnRemoteSource& source)
+void MyNotifyHandler::HandleSourcePapLost(sacn::Receiver::Handle handle, uint16_t universe, const SacnRemoteSource& source)
 {
   // Revert to using the per-packet priority value to resolve priorities for this universe.
 }
@@ -373,7 +378,7 @@ void my_sources_lost_callback(sacn_receiver_t handle, uint16_t universe, const S
 ```
 <!-- CODE_BLOCK_MID -->
 ```cpp
-void MyNotifyHandler::HandleSourcesLost(Handle handle, uint16_t universe,
+void MyNotifyHandler::HandleSourcesLost(sacn::Receiver::Handle handle, uint16_t universe,
                                         const std::vector<SacnLostSource>& lost_sources)
 {
   // You might not normally print a message on this condition, but this is just to demonstrate
@@ -423,7 +428,7 @@ void my_source_limit_exceeded_callback(sacn_receiver_t handle, uint16_t universe
 ```
 <!-- CODE_BLOCK_MID -->
 ```cpp
-void MyNotifyHandler::HandleSourceLimitExceeded(Handle handle, uint16_t universe)
+void MyNotifyHandler::HandleSourceLimitExceeded(sacn::Receiver::Handle handle, uint16_t universe)
 {
   // Handle the condition in an application-defined way. Maybe log it?
 }
